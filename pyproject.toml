@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=61.0","wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "headless-sidewalkreator"
+version = "0.0.0"
+description = "Headless prototype of OSM Sidewalkreator - generate sidewalks from OSM data without QGIS GUI"
+readme = "README.md"
+authors = [ { name = "Kaue Vestena", email = "kaue@example.com" } ]
+license = { text = "MIT" }
+requires-python = ">=3.8"
+keywords = ["osm", "geopandas", "osmnx", "sidewalks", "gis"]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Operating System :: OS Independent",
+  "Topic :: Scientific/Engineering :: GIS",
+]
+dependencies = [
+  "geopandas",
+  "osmnx",
+  "shapely",
+  "scipy",
+  "fiona",
+  "pyproj",
+  "rtree",
+  "pandas",
+  "networkx",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/kauevestena/headless_sidewalkreator"
+"Source" = "https://github.com/kauevestena/headless_sidewalkreator"
+"Tracker" = "https://github.com/kauevestena/headless_sidewalkreator/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["headless_sidewalkreator"]
