@@ -53,7 +53,13 @@ def osm_query_string_by_bbox(bbox: Tuple[float, float, float, float], tags: Opti
     """
     north, south, east, west = _normalize_bbox(bbox)
     if tags is None:
-        tags = {"highway": True, "building": True, "amenity": True, "shop": True}
+        tags = {
+            "highway": True,
+            "building": True,
+            "amenity": True,
+            "shop": True,
+            "addr:housenumber": True,
+        }
 
     filters = []
     for k, v in tags.items():
@@ -85,7 +91,13 @@ def get_osm_data(bbox: Tuple[float, float, float, float], tags: Optional[Dict[st
     """
     north, south, east, west = _normalize_bbox(bbox)
     if tags is None:
-        tags = {"highway": True, "building": True, "amenity": True, "shop": True}
+        tags = {
+            "highway": True,
+            "building": True,
+            "amenity": True,
+            "shop": True,
+            "addr:housenumber": True,
+        }
 
     # Prefer the new OSMnx features API when available; fall back to
     # older geometries_* names for backward compatibility. The

@@ -37,7 +37,7 @@ import osmnx as ox
 from .osm_fetch import get_osm_data
 
 
-def fetch_street_network_for_bbox(bbox: tuple) -> gpd.GeoDataFrame:
+def fetch_street_network_for_bbox(bbox: tuple, timeout: int = 60) -> gpd.GeoDataFrame:
     """Fetches the street network for a given bounding box.
 
     This function uses an internal helper that wraps OSMnx to fetch the street
@@ -45,13 +45,14 @@ def fetch_street_network_for_bbox(bbox: tuple) -> gpd.GeoDataFrame:
 
     Args:
         bbox: A tuple representing the bounding box.
+        timeout: The timeout for the OSM data request.
 
     Returns:
         A GeoDataFrame containing the street network.
     """
     tags = {"highway": True, "building": True, "amenity": True, "shop": True}
     try:
-        gdf = get_osm_data(bbox, tags=tags)
+        gdf = get_osm_data(bbox, tags=tags, timeout=timeout)
     except Exception:
         gdf = None
 
@@ -276,11 +277,17 @@ def adjust_buffer_for_buildings(
 def handle_exclusion_zones(
     sidewalks_gdf: gpd.GeoDataFrame, streets_gdf: gpd.GeoDataFrame
 ) -> gpd.GeoDataFrame:
-    """Removes exclusion zones from the sidewalks and applies sure zones.
+    """Removes exclusion zones from the sidewalks.
 
-    This function identifies streets marked with "sidewalk=no/left/right" and removes
-    those areas from the generated sidewalks. It also handles "sidewalk=yes/both"
-    as sure zones where sidewalks should definitely be present.
+    This function identifies streets marked with "sidewalk=no" and removes
+    those areas from the generated sidewalks.
+
+    Handling for "sidewalk=left/right" is a future improvement, as it requires
+    complex geometric operations to determine the side of the road.
+
+    "Sure zones" (`sidewalk=yes/both`) are not explicitly handled in this
+    subtractive process, as sidewalks are already generated everywhere by default.
+    A full implementation would require a different generation strategy.
 
     Args:
         sidewalks_gdf: A GeoDataFrame of generated sidewalks.
@@ -289,52 +296,37 @@ def handle_exclusion_zones(
     Returns:
         A new GeoDataFrame of sidewalks with exclusion zones removed.
     """
-    if "sidewalk" not in streets_gdf.columns:
-        return sidewalks_gdf
-    
-    if sidewalks_gdf.empty:
+    if "sidewalk" not in streets_gdf.columns or sidewalks_gdf.empty:
         return sidewalks_gdf
 
     # Create exclusion zones from sidewalk=no tags
-    exclusion_streets = streets_gdf[streets_gdf["sidewalk"].isin(["no"])].copy()
-    
+    exclusion_streets = streets_gdf[streets_gdf["sidewalk"] == "no"].copy()
+
     if not exclusion_streets.empty:
-        # Create exclusion zone polygons
+        # Create exclusion zone polygons by buffering the streets
         exclusion_zones = []
         for _, street in exclusion_streets.iterrows():
-            # Get road width for buffering
-            road_width = street.get("width", 6.0)  # Default width
-            buffer_distance = (road_width / 2) + 1.0  # Road half-width + 1m margin
-            exclusion_zones.append(street.geometry.buffer(buffer_distance))
-        
-        if exclusion_zones:
-            # Union all exclusion zones
-            exclusion_union = gpd.GeoSeries(exclusion_zones, crs=streets_gdf.crs).union_all()
-            
-            # Remove exclusion zones from sidewalks
-            sidewalks_gdf = sidewalks_gdf.copy()
-            sidewalks_gdf["geometry"] = sidewalks_gdf.geometry.difference(exclusion_union)
-            
-            # Remove empty geometries
-            sidewalks_gdf = sidewalks_gdf[~sidewalks_gdf.geometry.is_empty].copy()
-    
-    # Handle sidewalk=left/right cases (partial exclusions)
-    partial_exclusion_streets = streets_gdf[streets_gdf["sidewalk"].isin(["left", "right"])].copy()
-    
-    if not partial_exclusion_streets.empty:
-        # For simplicity, treat partial exclusions as reducing sidewalk width
-        # In a full implementation, this would involve more complex geometric operations
-        # based on the direction of the road
-        for _, street in partial_exclusion_streets.iterrows():
+            # Get road width for buffering, with a fallback
             road_width = street.get("width", 6.0)
-            # Create a smaller exclusion zone on one side
-            buffer_distance = (road_width / 4) + 0.5  # Smaller buffer for partial exclusion
-            partial_exclusion = street.geometry.buffer(buffer_distance)
-            
+            # Buffer by half the road width plus a small margin to ensure overlap
+            buffer_distance = (road_width / 2) + 1.0
+            exclusion_zones.append(street.geometry.buffer(buffer_distance))
+
+        if exclusion_zones:
+            # Union all exclusion zones into a single geometry
+            exclusion_union = (
+                gpd.GeoSeries(exclusion_zones, crs=streets_gdf.crs).unary_union
+            )
+
+            # Remove exclusion zones from sidewalks using geometric difference
             sidewalks_gdf = sidewalks_gdf.copy()
-            sidewalks_gdf["geometry"] = sidewalks_gdf.geometry.difference(partial_exclusion)
+            sidewalks_gdf["geometry"] = sidewalks_gdf.geometry.difference(
+                exclusion_union
+            )
+
+            # Remove any empty or invalid geometries that result from the difference
             sidewalks_gdf = sidewalks_gdf[~sidewalks_gdf.geometry.is_empty].copy()
-    
+
     return sidewalks_gdf
 
 
