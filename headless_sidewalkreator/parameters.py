@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 
-"""
-File intended to store "hyperparameters"
+"""Configurable parameters for the sidewalk generation process.
 
-
-ALL DISTANCES MUST BE IN METERS, no feets nor yards
+This file contains constants and "hyperparameters" that control the behavior
+of the sidewalk generation algorithm. All distance values are in meters.
 """
 
 
