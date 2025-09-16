@@ -1,6 +1,6 @@
 import geopandas as gpd
 from shapely.geometry import LineString
-from generic_functions_headless import remove_lines_from_no_block_gdf
+from headless_sidewalkreator.generic_functions import remove_lines_from_no_block_gdf
 
 
 def test_remove_dead_ends():
