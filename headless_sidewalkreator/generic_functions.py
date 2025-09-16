@@ -77,6 +77,10 @@ def fetch_street_network_for_bbox(bbox: tuple) -> gpd.GeoDataFrame:
             ),
         ]
         gdf = gpd.GeoDataFrame(geometry=lines)
+        gdf["highway"] = "unclassified"
+        gdf["building"] = None
+        gdf["amenity"] = None
+        gdf["shop"] = None
         try:
             gdf = gdf.set_crs("EPSG:4326")
         except Exception:
@@ -260,7 +264,7 @@ def handle_exclusion_zones(
         return sidewalks_gdf
 
     exclusion_buffer = exclusion_zones.buffer(exclusion_zones["width"] / 2 + 1)
-    return sidewalks_gdf.difference(exclusion_buffer.unary_union)
+    return sidewalks_gdf.difference(exclusion_buffer.union_all())
 
 
 import networkx as nx
@@ -393,22 +397,26 @@ def filter_and_buffer_protoblocks_gdf(
     if sidewalks_gdf.empty:
         return protoblocks_gdf.dissolve().buffer(0.1)
 
+    # Calculate sidewalk area and store it in a new column
+    sidewalks_with_area_gdf = sidewalks_gdf.copy()
+    sidewalks_with_area_gdf["sidewalk_area_val"] = sidewalks_with_area_gdf.geometry.area
+
     # Spatial join
     joined_gdf = gpd.sjoin(
-        protoblocks_gdf, sidewalks_gdf, how="inner", predicate="intersects"
+        protoblocks_gdf, sidewalks_with_area_gdf, how="inner", predicate="intersects"
     )
 
-    # Calculate sidewalk area per protoblock
-    joined_gdf["sidewalk_area"] = joined_gdf.geometry.area
+    # Sum the areas of intersecting sidewalks for each protoblock
     sidewalk_area_per_protoblock = joined_gdf.groupby(
         joined_gdf.index
-    ).sidewalk_area.sum()
+    ).sidewalk_area_val.sum()
 
     # Calculate protoblock area
     protoblocks_gdf["protoblock_area"] = protoblocks_gdf.geometry.area
 
     # Join the two series
     protoblocks_gdf = protoblocks_gdf.join(sidewalk_area_per_protoblock)
+    protoblocks_gdf.rename(columns={"sidewalk_area_val": "sidewalk_area"}, inplace=True)
     protoblocks_gdf["sidewalk_area"] = protoblocks_gdf["sidewalk_area"].fillna(0)
 
     # Calculate ratio and filter
@@ -820,13 +828,28 @@ def calculate_sidewalk_properties(sidewalks_gdf: gpd.GeoDataFrame) -> gpd.GeoDat
     return sidewalks_gdf
 
 
+def generate_kerbs_gdf(crossings_gdf):
+    """
+    Generates kerbs at the start and end points of each crossing line.
+    """
+    kerbs = []
+    for _, row in crossings_gdf.iterrows():
+        line = row.geometry
+        start_point = Point(line.coords[0])
+        end_point = Point(line.coords[-1])
+        kerbs.extend([start_point, end_point])
+
+    return gpd.GeoDataFrame(geometry=kerbs, crs=crossings_gdf.crs)
+
+
 def draw_sidewalks_gdf(
     gdf: gpd.GeoDataFrame,
     buildings_gdf: gpd.GeoDataFrame,
     streets_gdf: gpd.GeoDataFrame,
     buffer_dist: float,
 ) -> gpd.GeoDataFrame:
-    """Generates sidewalks by buffering street lines.
+  """
+   Generates sidewalks by buffering street lines.
 
     This function creates sidewalk polygons by buffering street lines. It adjusts
     the buffer distance based on proximity to buildings and handles exclusion

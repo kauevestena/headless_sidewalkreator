@@ -20,6 +20,7 @@ from .generic_functions import (
     filter_and_buffer_protoblocks_gdf,
     draw_crossings_gdf,
     split_sidewalks_gdf,
+    generate_kerbs_gdf,
 )
 from .parameters import *
 
@@ -144,7 +145,8 @@ def run_headless(
             crossings_output_path, driver="GeoJSON"
         )
 
-    kerbs_gdf = gpd.GeoDataFrame()  # Placeholder for kerbs
+    # 15. Generate kerbs
+    kerbs_gdf = generate_kerbs_gdf(crossings_gdf)
     kerbs_output_path = os.path.join(output_directory, "kerbs_output.geojson")
     if not kerbs_gdf.empty:
         kerbs_gdf.to_crs("EPSG:4326").to_file(kerbs_output_path, driver="GeoJSON")

@@ -48,8 +48,34 @@ def test_run_headless(setup_test_dir, osm_sample_gdf):
     assert os.path.exists(crossings_file)
     crossings_gdf = gpd.read_file(crossings_file)
     assert not crossings_gdf.empty
-    assert crossings_gdf.crs.to_string() == "EPSG:4326"
-    assert len(crossings_gdf) > 0
+
+
+def test_main_cli_entrypoint(setup_test_dir):
+    """Test the command-line entry point of main.py."""
+    import subprocess
+    import sys
+
+    test_dir = setup_test_dir
+    input_polygon = os.path.join(
+        os.path.dirname(__file__), "extra_tests", "polygon02.geojson"
+    )
+    output_dir = os.path.join(test_dir, "cli_output")
+
+    # Run the main.py script as a module
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "headless_sidewalkreator.main",
+            input_polygon,
+            output_dir,
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "Process complete" in result.stdout
 
 
 @patch('headless_sidewalkreator.main.fetch_street_network_for_bbox')

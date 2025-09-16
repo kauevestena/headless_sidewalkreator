@@ -43,7 +43,8 @@ def test_get_osm_data_features_from_bbox():
 def test_get_osm_data_geometries_from_bbox():
     """Test get_osm_data with ox.geometries_from_bbox."""
     mock_gdf = gpd.GeoDataFrame({"geometry": [Point(1, 1)]}, crs="EPSG:4326")
-    ox_mock = MagicMock(spec=['geometries_from_bbox', 'utils_graph'])
+    ox_mock = MagicMock(spec=['geometries_from_bbox', 'utils_graph', 'features'])
+    del ox_mock.features
     ox_mock.geometries_from_bbox.return_value = mock_gdf
 
     with patch('headless_sidewalkreator.osm_fetch.ox', ox_mock):
@@ -112,3 +113,31 @@ def test_get_osm_data_missing_crs():
     with patch('headless_sidewalkreator.osm_fetch.ox', ox_mock):
         gdf = get_osm_data((0,0,1,1))
         assert gdf.crs.to_string() == "EPSG:4326"
+
+
+def test_get_osm_data_with_graph_result_conversion_failure():
+    """Test get_osm_data with a graph result that fails to convert."""
+    mock_graph = MagicMock()
+    mock_graph.nodes = [1, 2]
+    mock_graph.edges = [(1, 2)]
+
+    ox_mock = MagicMock(spec=['features_from_bbox', 'utils_graph'])
+    ox_mock.features_from_bbox.return_value = mock_graph
+    ox_mock.utils_graph.graph_to_gdfs.side_effect = Exception("Conversion Failed")
+
+    with patch('headless_sidewalkreator.osm_fetch.ox', ox_mock):
+        gdf = get_osm_data((0, 0, 1, 1))
+        assert isinstance(gdf, gpd.GeoDataFrame)
+        assert gdf.empty
+
+
+@patch('time.sleep', return_value=None)
+def test_get_osm_data_max_retries_exceeded(mock_sleep):
+    """Test that the final error is raised after max_retries."""
+    ox_mock = MagicMock(spec=['features_from_bbox'])
+    ox_mock.features_from_bbox.side_effect = Exception("Failed")
+
+    with patch('headless_sidewalkreator.osm_fetch.ox', ox_mock):
+        with pytest.raises(RuntimeError, match="Failed to fetch OSM data: Failed"):
+            get_osm_data((0, 0, 1, 1), max_retries=2)
+        assert ox_mock.features_from_bbox.call_count == 3
