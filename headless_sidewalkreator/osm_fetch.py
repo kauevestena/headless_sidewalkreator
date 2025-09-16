@@ -78,29 +78,29 @@ def get_osm_data(bbox: Tuple[float, float, float, float], tags: Optional[Dict[st
     if tags is None:
         tags = {"highway": True, "building": True, "amenity": True, "shop": True}
 
+    # Prefer the new OSMnx features API when available; fall back to
+    # older geometries_* names for backward compatibility. The
+    # functions accept (north, south, east, west, tags).
+    fetch_func = None
+    # Newer OSMnx may expose a top-level helper `features_from_bbox`.
+    if hasattr(ox, "features_from_bbox"):
+        fetch_func = getattr(ox, "features_from_bbox")
+    # Older API used `geometries_from_bbox` at top-level
+    elif hasattr(ox, "geometries_from_bbox"):
+        fetch_func = getattr(ox, "geometries_from_bbox")
+    # Or OSMnx may expose a `features` module with the function
+    elif hasattr(ox, "features") and hasattr(ox.features, "features_from_bbox"):
+        fetch_func = getattr(ox.features, "features_from_bbox")
+    elif hasattr(ox, "features") and hasattr(ox.features, "geometries_from_bbox"):
+        fetch_func = getattr(ox.features, "geometries_from_bbox")
+
+    if fetch_func is None:
+        raise RuntimeError("No suitable OSMnx bbox fetch function found (features_from_bbox or geometries_from_bbox)")
+
     attempt = 0
     last_exc = None
     while attempt <= max_retries:
         try:
-            # Prefer the new OSMnx features API when available; fall back to
-            # older geometries_* names for backward compatibility. The
-            # functions accept (north, south, east, west, tags).
-            fetch_func = None
-            # Newer OSMnx may expose a top-level helper `features_from_bbox`.
-            if hasattr(ox, "features_from_bbox"):
-                fetch_func = getattr(ox, "features_from_bbox")
-            # Older API used `geometries_from_bbox` at top-level
-            elif hasattr(ox, "geometries_from_bbox"):
-                fetch_func = getattr(ox, "geometries_from_bbox")
-            # Or OSMnx may expose a `features` module with the function
-            elif hasattr(ox, "features") and hasattr(ox.features, "features_from_bbox"):
-                fetch_func = getattr(ox.features, "features_from_bbox")
-            elif hasattr(ox, "features") and hasattr(ox.features, "geometries_from_bbox"):
-                fetch_func = getattr(ox.features, "geometries_from_bbox")
-
-            if fetch_func is None:
-                raise RuntimeError("No suitable OSMnx bbox fetch function found (features_from_bbox or geometries_from_bbox)")
-
             result = fetch_func(north, south, east, west, tags)
 
             # OSMnx may return a GeoDataFrame, a Pandas DataFrame-like, or in

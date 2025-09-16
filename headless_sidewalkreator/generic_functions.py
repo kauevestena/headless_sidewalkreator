@@ -441,9 +441,17 @@ def split_sidewalks_by_voronoi(sidewalks_gdf, pois_gdf):
     new_sidewalks = []
     for i, row in sidewalks_gdf.iterrows():
         sidewalk = row.geometry.boundary
-        new_sidewalk_parts = split(sidewalk, voronoi_lines_gdf.unary_union)
-        for part in new_sidewalk_parts.geoms:
-            new_sidewalks.append(part)
+        splitter = voronoi_lines_gdf.union_all()
+        # Ensure splitter is not a GeometryCollection
+        if splitter.geom_type == 'GeometryCollection':
+            splitter = MultiLineString([line for line in splitter.geoms if line.geom_type in ['LineString', 'MultiLineString']])
+
+        if not splitter.is_empty:
+            new_sidewalk_parts = split(sidewalk, splitter)
+            for part in new_sidewalk_parts.geoms:
+                new_sidewalks.append(part)
+        else:
+            new_sidewalks.append(sidewalk)
 
     gdf = gpd.GeoDataFrame(geometry=new_sidewalks)
     gdf = gdf.set_crs(sidewalks_gdf.crs)
