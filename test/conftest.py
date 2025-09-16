@@ -35,12 +35,13 @@ def osm_sample_gdf():
     import geopandas as gpd
     from shapely.geometry import LineString, Point, Polygon
 
-    # Create a small square network (closed loop) so polygonization yields a protoblock
+    # Create a small square network with an intersection
     lines = [
         LineString([(0, 0), (0, 1)]),
         LineString([(0, 1), (1, 1)]),
         LineString([(1, 1), (1, 0)]),
         LineString([(1, 0), (0, 0)]),
+        LineString([(-0.5, 0.5), (1.5, 0.5)]), # Crossing line
     ]
 
     gdf = gpd.GeoDataFrame(
