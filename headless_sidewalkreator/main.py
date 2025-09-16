@@ -22,7 +22,7 @@ from .generic_functions import (
     split_sidewalks_gdf,
     generate_kerbs_gdf,
 )
-from .parameters import *
+from .parameters import default_widths, fallback_default_width, default_curve_radius
 
 
 def run_headless(
@@ -107,13 +107,14 @@ def run_headless(
     # 11. Separate POIs
     pois_gdf = osm_gdf[osm_gdf["amenity"].notna() | osm_gdf["shop"].notna()].copy()
 
-    # 12. Draw sidewalks
+    # 12. Draw sidewalks using proper algorithm
     sidewalks_gdf = draw_sidewalks_gdf(
-        cleaned_splitted_gdf, buildings_gdf, cleaned_gdf, 2
+        cleaned_splitted_gdf, buildings_gdf, cleaned_gdf, 
+        buffer_dist=2, curve_radius=default_curve_radius
     )
 
-    # 13. Draw crossings
-    crossings_gdf = draw_crossings_gdf(splitted_gdf)
+    # 13. Draw crossings using ABCDE algorithm
+    crossings_gdf = draw_crossings_gdf(splitted_gdf, sidewalks_gdf)
 
     # 14. Split sidewalks
     intersection_points_gdf = gpd.GeoDataFrame(
@@ -138,12 +139,22 @@ def run_headless(
         splitted_sidewalks_gdf.to_crs("EPSG:4326").to_file(
             sidewalks_output_path, driver="GeoJSON"
         )
+    else:
+        # Create empty file for consistency
+        empty_geojson = {"type": "FeatureCollection", "features": []}
+        with open(sidewalks_output_path, 'w') as f:
+            json.dump(empty_geojson, f)
 
     crossings_output_path = os.path.join(output_directory, "crossings_output.geojson")
     if not crossings_gdf.empty:
         crossings_gdf.to_crs("EPSG:4326").to_file(
             crossings_output_path, driver="GeoJSON"
         )
+    else:
+        # Create empty file for consistency
+        empty_geojson = {"type": "FeatureCollection", "features": []}
+        with open(crossings_output_path, 'w') as f:
+            json.dump(empty_geojson, f)
 
     # 15. Generate kerbs
     kerbs_gdf = generate_kerbs_gdf(crossings_gdf)
@@ -151,7 +162,76 @@ def run_headless(
     if not kerbs_gdf.empty:
         kerbs_gdf.to_crs("EPSG:4326").to_file(kerbs_output_path, driver="GeoJSON")
 
-    print(f"Process complete. Output saved to {output_path}")
+    # 16. Create merged output file (following QGIS plugin behavior)
+    create_merged_output(
+        output_directory, 
+        splitted_sidewalks_gdf if not splitted_sidewalks_gdf.empty else None,
+        crossings_gdf if not crossings_gdf.empty else None,
+        kerbs_gdf if not kerbs_gdf.empty else None
+    )
+
+    print(f"Process complete. Output saved to {output_directory}")
+
+
+def create_merged_output(output_directory, sidewalks_gdf, crossings_gdf, kerbs_gdf):
+    """Create a merged GeoJSON file for easy import into JOSM.
+    
+    This follows the QGIS plugin behavior of creating a single file with
+    all features for easy uploading to OpenStreetMap.
+    """
+    merged_features = []
+    
+    # Add sidewalks as lines
+    if sidewalks_gdf is not None and not sidewalks_gdf.empty:
+        sidewalks_4326 = sidewalks_gdf.to_crs("EPSG:4326")
+        for _, row in sidewalks_4326.iterrows():
+            feature = {
+                "type": "Feature",
+                "properties": {"highway": "footway", "footway": "sidewalk"},
+                "geometry": row.geometry.__geo_interface__
+            }
+            merged_features.append(feature)
+    
+    # Add crossings as lines
+    if crossings_gdf is not None and not crossings_gdf.empty:
+        crossings_4326 = crossings_gdf.to_crs("EPSG:4326")
+        for _, row in crossings_4326.iterrows():
+            feature = {
+                "type": "Feature", 
+                "properties": {"highway": "footway", "footway": "crossing"},
+                "geometry": row.geometry.__geo_interface__
+            }
+            merged_features.append(feature)
+    
+    # Add kerbs as points
+    if kerbs_gdf is not None and not kerbs_gdf.empty:
+        kerbs_4326 = kerbs_gdf.to_crs("EPSG:4326")
+        for _, row in kerbs_4326.iterrows():
+            feature = {
+                "type": "Feature",
+                "properties": {"barrier": "kerb"},
+                "geometry": row.geometry.__geo_interface__
+            }
+            merged_features.append(feature)
+    
+    # Create merged GeoJSON
+    merged_geojson = {
+        "type": "FeatureCollection",
+        "features": merged_features
+    }
+    
+    # Save merged file
+    merged_path = os.path.join(output_directory, "sidewalkreator_output.geojson")
+    with open(merged_path, 'w') as f:
+        json.dump(merged_geojson, f, indent=2)
+    
+    # Create changeset comment file
+    comment_path = os.path.join(output_directory, "changeset_comment.txt")
+    with open(comment_path, 'w') as f:
+        f.write("Generated sidewalks, crossings, and kerbs using OSM SidewalKreator\n")
+        f.write(f"Added {len([f for f in merged_features if f['properties'].get('footway') == 'sidewalk'])} sidewalk segments\n")
+        f.write(f"Added {len([f for f in merged_features if f['properties'].get('footway') == 'crossing'])} crossings\n") 
+        f.write(f"Added {len([f for f in merged_features if f['properties'].get('barrier') == 'kerb'])} kerbs\n")
 
 
 if __name__ == "__main__":

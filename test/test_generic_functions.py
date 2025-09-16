@@ -276,7 +276,7 @@ def test_handle_exclusion_zones():
 
     filtered_sidewalks = handle_exclusion_zones(sidewalks_gdf, streets_gdf)
     assert not filtered_sidewalks.empty
-    assert filtered_sidewalks.iloc[0].area < sidewalks_gdf.geometry.iloc[0].area
+    assert filtered_sidewalks.geometry.iloc[0].area < sidewalks_gdf.geometry.iloc[0].area
 
 
 def test_handle_exclusion_zones_no_exclusions():
