@@ -16,6 +16,10 @@ from headless_sidewalkreator.generic_functions import (
     split_sidewalks_by_max_length,
     split_sidewalks_by_num_segments,
     draw_sidewalks_gdf,
+    adjust_buffer_for_buildings,
+    handle_exclusion_zones,
+    calculate_crossing_direction,
+    generate_kerbs_gdf,
 )
 from headless_sidewalkreator.parameters import default_widths, fallback_default_width
 
@@ -71,6 +75,21 @@ def test_remove_lines_from_no_block_gdf_osmnx_path(mock_ox):
     cleaned_gdf = remove_lines_from_no_block_gdf(gdf)
     mock_ox.graph_from_gdfs.assert_called_once()
 
+
+def test_remove_lines_from_no_block_gdf_empty_input():
+    """Test remove_lines_from_no_block_gdf with an empty GeoDataFrame."""
+    gdf = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
+    cleaned_gdf = remove_lines_from_no_block_gdf(gdf)
+    assert cleaned_gdf.empty
+
+
+def test_remove_lines_from_no_block_gdf_invalid_geometry():
+    """Test remove_lines_from_no_block_gdf with invalid geometry."""
+    # A single point is not a line
+    gdf = gpd.GeoDataFrame(geometry=[Point(0, 0)], crs="EPSG:4326")
+    cleaned_gdf = remove_lines_from_no_block_gdf(gdf)
+    assert cleaned_gdf.equals(gdf)
+
 def test_filter_and_buffer_protoblocks_gdf_no_sidewalks():
     """Test filter_and_buffer_protoblocks_gdf with no sidewalks."""
     poly = Polygon([(0,0), (1,0), (1,1), (0,1)])
@@ -91,6 +110,37 @@ def test_data_clean_gdf_with_other_tags():
     cleaned_gdf, _, _ = data_clean_gdf(gdf, default_widths, fallback_default_width)
     assert 'width' in cleaned_gdf.columns
 
+
+def test_data_clean_gdf_with_footway():
+    """Test data_clean_gdf with footway column."""
+    data = {
+        'highway': ['footway', 'footway'],
+        'footway': ['sidewalk', 'crossing'],
+        'geometry': [LineString([(0,0), (1,1)]), LineString([(1,1), (2,2)])]
+    }
+    gdf = gpd.GeoDataFrame(data, crs="EPSG:4326")
+    _, existing_sidewalks, existing_crossings = data_clean_gdf(
+        gdf, default_widths, fallback_default_width
+    )
+    assert not existing_sidewalks.empty
+    assert not existing_crossings.empty
+
+
+@patch('headless_sidewalkreator.generic_functions.get_osm_data')
+def test_fetch_street_network_for_bbox_normalize_bbox(mock_get_osm_data):
+    """Test the fallback mechanism with a GeoDataFrame as bbox."""
+    mock_get_osm_data.side_effect = Exception("OSM fetch failed")
+
+    # Create a GeoDataFrame to use as the bbox
+    p1 = Polygon([(0,0), (1,0), (1,1), (0,1)])
+    bbox_gdf = gpd.GeoDataFrame([1], geometry=[p1], crs="EPSG:4326")
+
+    gdf = fetch_street_network_for_bbox(bbox_gdf)
+
+    assert not gdf.empty
+    assert len(gdf) == 3
+    assert gdf.crs.to_string() == "EPSG:4326"
+
 @pytest.mark.xfail(reason="Voronoi splitting is sensitive to floating point precision")
 def test_split_sidewalks_by_voronoi():
     """Test split_sidewalks_by_voronoi."""
@@ -103,6 +153,16 @@ def test_split_sidewalks_by_voronoi():
     splitted_gdf = split_sidewalks_by_voronoi(sidewalks_gdf, pois_gdf)
     assert len(splitted_gdf) > 1
 
+def test_split_sidewalks_by_voronoi_empty_pois():
+    """Test split_sidewalks_by_voronoi with empty POIs."""
+    sidewalk = Polygon([(0,0), (10,0), (10,2), (0,2)])
+    sidewalks_gdf = gpd.GeoDataFrame(geometry=[sidewalk], crs="EPSG:3857")
+    pois_gdf = gpd.GeoDataFrame(geometry=[], crs="EPSG:3857")
+
+    splitted_gdf = split_sidewalks_by_voronoi(sidewalks_gdf, pois_gdf)
+    assert splitted_gdf.equals(sidewalks_gdf)
+
+
 def test_split_sidewalks_by_protoblock_corners():
     """Test split_sidewalks_by_protoblock_corners."""
     sidewalk = Polygon([(0,0), (10,0), (10,2), (0,2)])
@@ -113,6 +173,27 @@ def test_split_sidewalks_by_protoblock_corners():
 
     splitted_gdf = split_sidewalks_by_protoblock_corners(sidewalks_gdf, protoblocks_gdf)
     assert len(splitted_gdf) > 1
+
+
+def test_split_sidewalks_by_protoblock_corners_empty_protoblocks():
+    """Test split_sidewalks_by_protoblock_corners with empty protoblocks."""
+    sidewalk = Polygon([(0,0), (10,0), (10,2), (0,2)])
+    sidewalks_gdf = gpd.GeoDataFrame(geometry=[sidewalk], crs="EPSG:3857")
+    protoblocks_gdf = gpd.GeoDataFrame(geometry=[], crs="EPSG:3857")
+
+    splitted_gdf = split_sidewalks_by_protoblock_corners(sidewalks_gdf, protoblocks_gdf)
+    assert splitted_gdf.equals(sidewalks_gdf)
+
+
+def test_split_sidewalks_by_protoblock_corners_invalid_geometry():
+    """Test split_sidewalks_by_protoblock_corners with invalid geometry."""
+    # A point is not a valid sidewalk geometry for splitting
+    sidewalks_gdf = gpd.GeoDataFrame(geometry=[Point(0, 0)], crs="EPSG:3857")
+    protoblock = Polygon([(0, 0), (5, 0), (5, 2), (0, 2)])
+    protoblocks_gdf = gpd.GeoDataFrame(geometry=[protoblock], crs="EPSG:3857")
+
+    splitted_gdf = split_sidewalks_by_protoblock_corners(sidewalks_gdf, protoblocks_gdf)
+    assert splitted_gdf.geometry.iloc[0].is_empty
 
 def test_split_sidewalks_by_max_length():
     """Test split_sidewalks_by_max_length."""
@@ -145,3 +226,91 @@ def test_draw_sidewalks_gdf(mock_adjust_buffer):
     sidewalks_gdf = draw_sidewalks_gdf(gdf, buildings_gdf, gdf, buffer_dist=2)
     assert not sidewalks_gdf.empty
     mock_adjust_buffer.assert_called_once()
+
+
+def test_adjust_buffer_for_buildings():
+    """Test adjust_buffer_for_buildings."""
+    lines = [LineString([(0, 0), (10, 0)])]
+    lines_gdf = gpd.GeoDataFrame(geometry=lines, crs="EPSG:3857")
+    buildings = [Polygon([(0, 2), (2, 2), (2, 4), (0, 4)])]
+    buildings_gdf = gpd.GeoDataFrame(geometry=buildings, crs="EPSG:3857")
+
+    adjusted_gdf = adjust_buffer_for_buildings(lines_gdf, buildings_gdf, 5)
+    assert "buffer_dist" in adjusted_gdf.columns
+    assert adjusted_gdf["buffer_dist"].iloc[0] < 5
+
+
+def test_adjust_buffer_for_buildings_no_buildings():
+    """Test adjust_buffer_for_buildings with no buildings."""
+    lines = [LineString([(0, 0), (10, 0)])]
+    lines_gdf = gpd.GeoDataFrame(geometry=lines, crs="EPSG:3857")
+    buildings_gdf = gpd.GeoDataFrame(geometry=[], crs="EPSG:3857")
+
+    adjusted_gdf = adjust_buffer_for_buildings(lines_gdf, buildings_gdf, 5)
+    assert "buffer_dist" in adjusted_gdf.columns
+    assert adjusted_gdf["buffer_dist"].iloc[0] == 5
+
+
+def test_filter_and_buffer_protoblocks_gdf():
+    """Test filter_and_buffer_protoblocks_gdf."""
+    protoblocks = [Polygon([(0, 0), (100, 0), (100, 100), (0, 100)])]
+    protoblocks_gdf = gpd.GeoDataFrame(geometry=protoblocks, crs="EPSG:3857")
+    # Create a sidewalk that covers a small percentage of the protoblock
+    sidewalks = [Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])]
+    sidewalks_gdf = gpd.GeoDataFrame(geometry=sidewalks, crs="EPSG:3857")
+
+    filtered_gdf = filter_and_buffer_protoblocks_gdf(
+        protoblocks_gdf, sidewalks_gdf, cutoff_percent=50
+    )
+    assert not filtered_gdf.empty
+
+
+def test_handle_exclusion_zones():
+    """Test handle_exclusion_zones."""
+    sidewalks = [Polygon([(0, 0), (10, 0), (10, 2), (0, 2)])]
+    sidewalks_gdf = gpd.GeoDataFrame(geometry=sidewalks, crs="EPSG:3857")
+    streets = [LineString([(5, -1), (5, 3)])]
+    streets_gdf = gpd.GeoDataFrame(
+        {"sidewalk": ["no"], "width": [2]}, geometry=streets, crs="EPSG:3857"
+    )
+
+    filtered_sidewalks = handle_exclusion_zones(sidewalks_gdf, streets_gdf)
+    assert not filtered_sidewalks.empty
+    assert filtered_sidewalks.iloc[0].area < sidewalks_gdf.geometry.iloc[0].area
+
+
+def test_handle_exclusion_zones_no_exclusions():
+    """Test handle_exclusion_zones with no exclusion zones."""
+    sidewalks = [Polygon([(0, 0), (10, 0), (10, 2), (0, 2)])]
+    sidewalks_gdf = gpd.GeoDataFrame(geometry=sidewalks, crs="EPSG:3857")
+    streets_gdf = gpd.GeoDataFrame(geometry=[], crs="EPSG:3857")
+
+    filtered_sidewalks = handle_exclusion_zones(sidewalks_gdf, streets_gdf)
+    assert filtered_sidewalks.equals(sidewalks_gdf)
+
+
+def test_calculate_crossing_direction_no_lines():
+    """Test calculate_crossing_direction with no lines."""
+    point = Point(0, 0)
+    lines_gdf = gpd.GeoDataFrame(geometry=[], crs="EPSG:3857")
+    direction = calculate_crossing_direction(point, lines_gdf)
+    assert direction is None
+
+
+def test_draw_crossings_gdf_no_crossings():
+    """Test draw_crossings_gdf with no crossings."""
+    streets_gdf = gpd.GeoDataFrame(
+        geometry=[LineString([(0, 0), (1, 1)])], crs="EPSG:3857"
+    )
+    crossings_gdf = draw_crossings_gdf(streets_gdf)
+    assert crossings_gdf.empty
+
+
+def test_generate_kerbs_gdf():
+    """Test generate_kerbs_gdf."""
+    crossings = [LineString([(0, 0), (2, 2)]), LineString([(1, 1), (3, 3)])]
+    crossings_gdf = gpd.GeoDataFrame(geometry=crossings, crs="EPSG:3857")
+
+    kerbs_gdf = generate_kerbs_gdf(crossings_gdf)
+    assert len(kerbs_gdf) == 4
+    assert all(kerbs_gdf.geometry.type == "Point")
