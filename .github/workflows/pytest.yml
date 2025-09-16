@@ -17,9 +17,9 @@ jobs:
           python-version: '3.11'
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip setuptools wheel
+          pip install -r requirements-runtime.txt
           pip install -r requirements-dev.txt
-          pip install -r requirements-runtime.txt || true
       - name: Run tests
         run: |
           pytest -q --cov=headless_sidewalkreator

@@ -9,57 +9,45 @@ requirements files.
 
 ## Development setup
 
-These instructions cover two common workflows: using a Python virtualenv or
-Conda. The project depends on geospatial libraries (geopandas, osmnx,
-shapely, GDAL, PROJ) which may require system-level packages on Linux.
+Modern versions of geopandas and related geospatial libraries come with
+bundled binaries, so no system-level packages are required.
 
-Recommended approach (virtualenv + apt):
+### Quick setup (Python 3.9+ recommended):
 
-1. Create a fresh Python virtual environment (Python 3.9+ recommended):
+1. Create and activate a Python virtual environment:
 
 ```bash
-# create and activate a venv
 python3 -m venv .venv
 source .venv/bin/activate
 
-# upgrade pip, wheel, setuptools
+# upgrade pip and build tools
 pip install --upgrade pip setuptools wheel
 ```
 
-2. Install OS-level prerequisites (Ubuntu/Debian example):
+2. Install all dependencies:
 
 ```bash
-# install system packages required by geopandas/osmnx
-sudo apt-get update
-sudo apt-get install -y build-essential gdal-bin libgdal-dev libproj-dev
-```
-
-3. Install runtime and dev Python dependencies:
-
-```bash
-# runtime requirements
+# install runtime dependencies
 pip install -r requirements-runtime.txt
 
-# development / test requirements
+# install development/test dependencies
 pip install -r requirements-dev.txt
 ```
 
-Conda alternative (recommended if you can't install system packages):
+### Alternative: Conda setup
+
+If you prefer conda:
 
 ```bash
 conda create -n hs-env python=3.10 -y
 conda activate hs-env
 
-# install geopandas/osmnx via conda-forge
-conda install -c conda-forge geopandas osmnx python-graphlib networkx -y
+# install via conda-forge for potentially faster geospatial package installation
+conda install -c conda-forge geopandas osmnx -y
 
-# install the rest of the runtime and dev deps with pip if needed
+# install remaining dependencies
 pip install -r requirements-dev.txt
 ```
-
-Notes about system packages
-- geopandas and osmnx rely on geospatial C libraries (GDAL, PROJ, GEOS).
-	If you hit installation errors, prefer the `conda-forge` route.
 
 ## Running tests
 
@@ -90,31 +78,6 @@ python -c "from headless_sidewalkreator import run_headless; print(run_headless.
 
 If you'd like, I can add a Makefile or small helper scripts to automate
 these steps.
-
-- Install runtime dependencies: geopandas, osmnx
-- Install dev dependencies for running tests: pytest, pytest-cov
-
-Usage
-
-Import the main function:
-
-from headless_sidewalkreator import run_headless
-
-run_headless("input_polygon.geojson", "output_dir")
-
-How to install and run tests
-
-Install runtime deps:
-
-python -m pip install -r requirements-runtime.txt
-
-Install dev deps (for testing):
-
-python -m pip install -r requirements-dev.txt
-
-Run tests:
-
-pytest -q
 
 [REPO IN PROGRESS]
 

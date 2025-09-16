@@ -12,8 +12,8 @@ Before making any changes, it's crucial to set up your development environment c
 
 Key setup points:
 - Use a Python virtual environment (`venv` or `conda`).
-- Install system-level dependencies for geospatial libraries (e.g., GDAL, PROJ). The `README.md` has examples for Debian/Ubuntu.
 - Install Python dependencies from `requirements-runtime.txt` and `requirements-dev.txt`.
+- Modern geospatial libraries (geopandas, fiona, etc.) are self-contained and don't require system packages.
 
 ## Codebase Overview
 
