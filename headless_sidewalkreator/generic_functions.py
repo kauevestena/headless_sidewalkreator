@@ -848,8 +848,7 @@ def draw_sidewalks_gdf(
     streets_gdf: gpd.GeoDataFrame,
     buffer_dist: float,
 ) -> gpd.GeoDataFrame:
-  """
-   Generates sidewalks by buffering street lines.
+    """Generates sidewalks by buffering street lines.
 
     This function creates sidewalk polygons by buffering street lines. It adjusts
     the buffer distance based on proximity to buildings and handles exclusion
