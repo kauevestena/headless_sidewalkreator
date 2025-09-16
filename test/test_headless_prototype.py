@@ -4,7 +4,7 @@ import json
 import geopandas as gpd
 import pytest
 from unittest.mock import patch
-from headless_prototype import run_headless
+from headless_sidewalkreator import run_headless
 
 
 @pytest.fixture

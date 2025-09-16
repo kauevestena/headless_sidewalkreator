@@ -1,6 +1,6 @@
 import geopandas as gpd
 from shapely.geometry import LineString, MultiPoint
-from generic_functions_headless import (
+from headless_sidewalkreator.generic_functions import (
     split_lines_at_intersections,
     remove_lines_from_no_block_gdf,
 )
