@@ -43,14 +43,21 @@ def run_headless(
         osm_gdf: Optional GeoDataFrame with OSM data to be used instead of fetching.
     """
 
-    # Load parameters or use defaults
+    # Consolidate parameters
+    run_params = {
+        "timeout": 60,
+        "default_widths": default_widths,
+        "fallback_default_width": fallback_default_width,
+        "default_curve_radius": default_curve_radius,
+        "buffer_dist": 2,
+        "split_max_len": None,
+        "split_num_segments": None,
+    }
+
     if parameters_path and os.path.exists(parameters_path):
         with open(parameters_path, "r") as f:
-            params = json.load(f)
-    else:
-        params = {
-            "timeout": 60,
-        }
+            user_params = json.load(f)
+        run_params.update(user_params)
 
     # Create output directory if it doesn't exist
     if not os.path.exists(output_directory):
@@ -64,7 +71,7 @@ def run_headless(
 
     # 3. Fetch OSM Data (allow injection for tests via `osm_gdf`)
     if osm_gdf is None:
-        osm_gdf = fetch_street_network_for_bbox(bbox)
+        osm_gdf = fetch_street_network_for_bbox(bbox, timeout=run_params["timeout"])
 
     print(f"Number of features in osm_gdf: {len(osm_gdf)}")
     print(f"Columns in osm_gdf: {osm_gdf.columns}")
@@ -83,7 +90,9 @@ def run_headless(
     print(f"Number of features in clipped_reproj_gdf: {len(clipped_reproj_gdf)}")
     # 6. Clean data
     cleaned_gdf, existing_sidewalks, existing_crossings = data_clean_gdf(
-        clipped_reproj_gdf, default_widths, fallback_default_width
+        clipped_reproj_gdf,
+        run_params["default_widths"],
+        run_params["fallback_default_width"],
     )
 
     # 7. Split lines at intersections
@@ -101,16 +110,40 @@ def run_headless(
         protoblocks_gdf, existing_sidewalks
     )
 
-    # 11. Separate buildings
+    # 11. Separate buildings, addresses, and other POIs
     buildings_gdf = osm_gdf[osm_gdf["building"].notna()].copy()
+    if "addr:housenumber" in osm_gdf.columns:
+        addresses_gdf = osm_gdf[osm_gdf["addr:housenumber"].notna()].copy()
+    else:
+        addresses_gdf = gpd.GeoDataFrame(geometry=[], crs=osm_gdf.crs)
 
-    # 11. Separate POIs
-    pois_gdf = osm_gdf[osm_gdf["amenity"].notna() | osm_gdf["shop"].notna()].copy()
+    other_pois_gdf = osm_gdf[
+        osm_gdf["amenity"].notna() | osm_gdf["shop"].notna()
+    ].copy()
+
+    # Create a unified POI layer for sidewalk splitting
+    poi_layers = []
+    if not buildings_gdf.empty:
+        building_centroids = buildings_gdf.copy()
+        building_centroids["geometry"] = building_centroids.geometry.centroid
+        poi_layers.append(building_centroids)
+    if not addresses_gdf.empty:
+        poi_layers.append(addresses_gdf)
+    if not other_pois_gdf.empty:
+        poi_layers.append(other_pois_gdf)
+
+    if poi_layers:
+        unified_pois_gdf = gpd.pd.concat(poi_layers, ignore_index=True)
+    else:
+        unified_pois_gdf = gpd.GeoDataFrame(geometry=[])
 
     # 12. Draw sidewalks using proper algorithm
     sidewalks_gdf = draw_sidewalks_gdf(
-        cleaned_splitted_gdf, buildings_gdf, cleaned_gdf, 
-        buffer_dist=2, curve_radius=default_curve_radius
+        cleaned_splitted_gdf,
+        buildings_gdf,
+        cleaned_gdf,
+        buffer_dist=run_params["buffer_dist"],
+        curve_radius=run_params["default_curve_radius"],
     )
 
     # 13. Draw crossings using ABCDE algorithm
@@ -124,9 +157,9 @@ def run_headless(
         sidewalks_gdf,
         intersection_points_gdf,
         protoblocks_gdf,
-        pois_gdf,
-        max_length=params.get("split_max_len"),
-        num_segments=params.get("split_num_segments"),
+        unified_pois_gdf,  # Use the new unified POI layer
+        max_length=run_params.get("split_max_len"),
+        num_segments=run_params.get("split_num_segments"),
     )
 
     # 14. Output results
@@ -142,7 +175,7 @@ def run_headless(
     else:
         # Create empty file for consistency
         empty_geojson = {"type": "FeatureCollection", "features": []}
-        with open(sidewalks_output_path, 'w') as f:
+        with open(sidewalks_output_path, "w") as f:
             json.dump(empty_geojson, f)
 
     crossings_output_path = os.path.join(output_directory, "crossings_output.geojson")
@@ -153,7 +186,7 @@ def run_headless(
     else:
         # Create empty file for consistency
         empty_geojson = {"type": "FeatureCollection", "features": []}
-        with open(crossings_output_path, 'w') as f:
+        with open(crossings_output_path, "w") as f:
             json.dump(empty_geojson, f)
 
     # 15. Generate kerbs
@@ -164,11 +197,16 @@ def run_headless(
 
     # 16. Create merged output file (following QGIS plugin behavior)
     create_merged_output(
-        output_directory, 
+        output_directory,
         splitted_sidewalks_gdf if not splitted_sidewalks_gdf.empty else None,
         crossings_gdf if not crossings_gdf.empty else None,
-        kerbs_gdf if not kerbs_gdf.empty else None
+        kerbs_gdf if not kerbs_gdf.empty else None,
     )
+
+    # 17. Save parameters to a file
+    params_output_path = os.path.join(output_directory, "parameters.json")
+    with open(params_output_path, "w") as f:
+        json.dump(run_params, f, indent=4)
 
     print(f"Process complete. Output saved to {output_directory}")
 
