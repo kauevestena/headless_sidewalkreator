@@ -1,22 +1,34 @@
 # -*- coding: utf-8 -*-
-"""
-This file contains generic functions for the headless prototype, using geopandas.
+"""Generic geospatial functions for the sidewalk generation process.
+
+This module provides a collection of functions for reading, processing, and
+transforming geospatial data using GeoPandas and other related libraries.
 """
 
 import geopandas as gpd
 from shapely.geometry import Polygon, MultiPolygon, LineString, MultiLineString
 
 
-def read_input_polygon(filepath):
-    """
-    Reads an input polygon from a file and returns a GeoDataFrame.
+def read_input_polygon(filepath: str) -> gpd.GeoDataFrame:
+    """Reads an input polygon from a file and returns a GeoDataFrame.
+
+    Args:
+        filepath: The path to the input polygon file.
+
+    Returns:
+        A GeoDataFrame containing the input polygon.
     """
     return gpd.read_file(filepath)
 
 
-def get_bbox_from_gdf(gdf):
-    """
-    Gets the bounding box from a GeoDataFrame.
+def get_bbox_from_gdf(gdf: gpd.GeoDataFrame) -> tuple:
+    """Gets the bounding box from a GeoDataFrame.
+
+    Args:
+        gdf: The GeoDataFrame from which to extract the bounding box.
+
+    Returns:
+        A tuple representing the bounding box (minx, miny, maxx, maxy).
     """
     return gdf.total_bounds
 
@@ -25,10 +37,17 @@ import osmnx as ox
 from .osm_fetch import get_osm_data
 
 
-def fetch_street_network_for_bbox(bbox):
-    """
-    Fetches the street network for a given bounding box using an internal helper
-    that wraps OSMnx. The bbox must be (minx, miny, maxx, maxy).
+def fetch_street_network_for_bbox(bbox: tuple) -> gpd.GeoDataFrame:
+    """Fetches the street network for a given bounding box.
+
+    This function uses an internal helper that wraps OSMnx to fetch the street
+    network. The bounding box must be in the format (minx, miny, maxx, maxy).
+
+    Args:
+        bbox: A tuple representing the bounding box.
+
+    Returns:
+        A GeoDataFrame containing the street network.
     """
     tags = {"highway": True, "building": True, "amenity": True, "shop": True}
     try:
@@ -70,16 +89,28 @@ def fetch_street_network_for_bbox(bbox):
     return gdf
 
 
-def clip_gdf(gdf, clip_geom):
-    """
-    Clips a GeoDataFrame with a clipping geometry.
+def clip_gdf(gdf: gpd.GeoDataFrame, clip_geom: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Clips a GeoDataFrame with a clipping geometry.
+
+    Args:
+        gdf: The GeoDataFrame to be clipped.
+        clip_geom: The GeoDataFrame containing the clipping geometry.
+
+    Returns:
+        A new GeoDataFrame containing the clipped geometries.
     """
     return gpd.clip(gdf, clip_geom)
 
 
-def reproject_gdf(gdf, target_crs):
-    """
-    Reprojects a GeoDataFrame to a target CRS.
+def reproject_gdf(gdf: gpd.GeoDataFrame, target_crs: str) -> gpd.GeoDataFrame:
+    """Reprojects a GeoDataFrame to a target CRS.
+
+    Args:
+        gdf: The GeoDataFrame to reproject.
+        target_crs: The target CRS string (e.g., "EPSG:4326").
+
+    Returns:
+        A new GeoDataFrame reprojected to the target CRS.
     """
     return gdf.to_crs(target_crs)
 
@@ -87,9 +118,16 @@ def reproject_gdf(gdf, target_crs):
 from shapely.ops import polygonize
 
 
-def polygonize_lines_gdf(gdf):
-    """
-    Polygonizes lines in a GeoDataFrame.
+def polygonize_lines_gdf(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Polygonizes lines in a GeoDataFrame.
+
+    This function takes a GeoDataFrame of lines and creates polygons from them.
+
+    Args:
+        gdf: A GeoDataFrame containing LineString geometries.
+
+    Returns:
+        A new GeoDataFrame containing the polygonized geometries.
     """
     lines = [geom for geom in gdf.geometry]
     print(f"Number of lines to polygonize: {len(lines)}")
@@ -108,9 +146,17 @@ from shapely.ops import split
 from shapely.geometry import MultiPoint, Point
 
 
-def split_lines_at_intersections(gdf):
-    """
-    Splits lines at their intersections.
+def split_lines_at_intersections(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Splits lines at their intersections.
+
+    This function takes a GeoDataFrame of lines and splits them at any point
+    where they intersect with another line.
+
+    Args:
+        gdf: A GeoDataFrame containing LineString geometries.
+
+    Returns:
+        A new GeoDataFrame containing the split line segments.
     """
     # Find all intersections
     intersections = gdf.sindex.query(gdf.geometry, predicate="intersects")
@@ -148,9 +194,24 @@ def split_lines_at_intersections(gdf):
 from shapely.ops import nearest_points
 
 
-def adjust_buffer_for_buildings(lines_gdf, buildings_gdf, default_buffer):
-    """
-    Adjusts the buffer distance for each line based on the distance to the nearest building.
+def adjust_buffer_for_buildings(
+    lines_gdf: gpd.GeoDataFrame,
+    buildings_gdf: gpd.GeoDataFrame,
+    default_buffer: float,
+) -> gpd.GeoDataFrame:
+    """Adjusts the buffer distance for lines based on proximity to buildings.
+
+    For each line, this function calculates the distance to the nearest building
+    and adjusts the buffer distance accordingly. The buffer is set to half the
+    distance to the building, capped at the default buffer value.
+
+    Args:
+        lines_gdf: A GeoDataFrame of lines to buffer.
+        buildings_gdf: A GeoDataFrame of building polygons.
+        default_buffer: The default buffer distance to use when no buildings are nearby.
+
+    Returns:
+        The input GeoDataFrame with an added "buffer_dist" column.
     """
     if buildings_gdf.empty:
         lines_gdf["buffer_dist"] = default_buffer
@@ -180,9 +241,20 @@ def adjust_buffer_for_buildings(lines_gdf, buildings_gdf, default_buffer):
     return lines_gdf
 
 
-def handle_exclusion_zones(sidewalks_gdf, streets_gdf):
-    """
-    Removes exclusion zones from the sidewalks.
+def handle_exclusion_zones(
+    sidewalks_gdf: gpd.GeoDataFrame, streets_gdf: gpd.GeoDataFrame
+) -> gpd.GeoDataFrame:
+    """Removes exclusion zones from the sidewalks.
+
+    This function identifies streets marked with "sidewalk=no" and removes
+    those areas from the generated sidewalks.
+
+    Args:
+        sidewalks_gdf: A GeoDataFrame of generated sidewalks.
+        streets_gdf: A GeoDataFrame of streets, potentially with a "sidewalk" column.
+
+    Returns:
+        A new GeoDataFrame of sidewalks with exclusion zones removed.
     """
     if "sidewalk" not in streets_gdf.columns:
         return sidewalks_gdf
@@ -198,9 +270,21 @@ def handle_exclusion_zones(sidewalks_gdf, streets_gdf):
 import networkx as nx
 
 
-def remove_lines_from_no_block_gdf(gdf, iterations=1):
-    """
-    Removes lines that do not form a block.
+def remove_lines_from_no_block_gdf(
+    gdf: gpd.GeoDataFrame, iterations: int = 1
+) -> gpd.GeoDataFrame:
+    """Removes lines that do not form a block (dead-ends).
+
+    This function iteratively removes lines that are not part of a larger block
+    or network. It uses either an OSMnx-based approach or a manual fallback
+    method to identify and prune dead-end edges.
+
+    Args:
+        gdf: A GeoDataFrame of lines to process.
+        iterations: The number of times to iteratively remove dead-ends.
+
+    Returns:
+        A new GeoDataFrame with dead-end lines removed.
     """
 
     # Try to use OSMnx conversion; if it succeeds, convert to edges GeoDataFrame
@@ -291,10 +375,24 @@ def remove_lines_from_no_block_gdf(gdf, iterations=1):
 
 
 def filter_and_buffer_protoblocks_gdf(
-    protoblocks_gdf, sidewalks_gdf, cutoff_percent=50
-):
-    """
-    Filters and buffers the protoblocks.
+    protoblocks_gdf: gpd.GeoDataFrame,
+    sidewalks_gdf: gpd.GeoDataFrame,
+    cutoff_percent: int = 50,
+) -> gpd.GeoDataFrame:
+    """Filters and buffers the protoblocks based on sidewalk coverage.
+
+    This function filters out protoblocks that have a high percentage of their
+    area already covered by existing sidewalks. The remaining protoblocks are
+    then dissolved and buffered.
+
+    Args:
+        protoblocks_gdf: A GeoDataFrame of protoblock polygons.
+        sidewalks_gdf: A GeoDataFrame of existing sidewalk polygons.
+        cutoff_percent: The percentage of sidewalk area above which a
+            protoblock will be filtered out.
+
+    Returns:
+        A GeoDataFrame containing the filtered and buffered protoblocks.
     """
     if sidewalks_gdf.empty:
         return protoblocks_gdf.dissolve().buffer(0.1)
@@ -337,9 +435,19 @@ def filter_and_buffer_protoblocks_gdf(
 import math
 
 
-def calculate_crossing_direction(point, lines):
-    """
-    Calculates the direction vector of the crossing.
+def calculate_crossing_direction(point: Point, lines: gpd.GeoDataFrame) -> Point:
+    """Calculates the direction vector of a crossing.
+
+    This function determines the direction of a crossing by finding the
+    bisection of the angle between the two most aligned intersecting lines.
+
+    Args:
+        point: The intersection point of the crossing.
+        lines: A GeoDataFrame of lines that intersect at the point.
+
+    Returns:
+        A Point object representing the direction vector of the crossing, or
+        None if the direction cannot be determined.
     """
     if len(lines) < 2:
         return None
@@ -376,9 +484,17 @@ def calculate_crossing_direction(point, lines):
     return Point(math.cos(angle), math.sin(angle))
 
 
-def draw_crossings_gdf(streets_gdf):
-    """
-    Generates crossings at the intersections of the street lines.
+def draw_crossings_gdf(streets_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Generates crossings at the intersections of street lines.
+
+    This function identifies all intersection points in the street network and
+    draws crossing lines at these locations.
+
+    Args:
+        streets_gdf: A GeoDataFrame of street lines.
+
+    Returns:
+        A new GeoDataFrame containing the generated crossing lines.
     """
     # Find all intersection points
     intersections = streets_gdf.sindex.query(
@@ -426,9 +542,20 @@ def draw_crossings_gdf(streets_gdf):
 from scipy.spatial import Voronoi
 
 
-def split_sidewalks_by_voronoi(sidewalks_gdf, pois_gdf):
-    """
-    Splits the sidewalks by Voronoi polygons created from the POIs.
+def split_sidewalks_by_voronoi(
+    sidewalks_gdf: gpd.GeoDataFrame, pois_gdf: gpd.GeoDataFrame
+) -> gpd.GeoDataFrame:
+    """Splits sidewalks by Voronoi polygons generated from POIs.
+
+    This function creates Voronoi polygons from a set of points of interest (POIs)
+    and uses the edges of these polygons to split the sidewalk lines.
+
+    Args:
+        sidewalks_gdf: A GeoDataFrame of sidewalk lines.
+        pois_gdf: A GeoDataFrame of POIs.
+
+    Returns:
+        A new GeoDataFrame containing the split sidewalk segments.
     """
     if pois_gdf.empty:
         return sidewalks_gdf
@@ -466,9 +593,20 @@ def split_sidewalks_by_voronoi(sidewalks_gdf, pois_gdf):
     return gdf
 
 
-def split_sidewalks_by_protoblock_corners(sidewalks_gdf, protoblocks_gdf):
-    """
-    Splits the sidewalks by the corners of the protoblocks.
+def split_sidewalks_by_protoblock_corners(
+    sidewalks_gdf: gpd.GeoDataFrame, protoblocks_gdf: gpd.GeoDataFrame
+) -> gpd.GeoDataFrame:
+    """Splits sidewalks by the corners of protoblocks.
+
+    This function extracts the corner vertices from protoblock polygons and uses
+    them as points to split the sidewalk lines.
+
+    Args:
+        sidewalks_gdf: A GeoDataFrame of sidewalk lines.
+        protoblocks_gdf: A GeoDataFrame of protoblock polygons.
+
+    Returns:
+        A new GeoDataFrame containing the split sidewalk segments.
     """
     if protoblocks_gdf.empty:
         return sidewalks_gdf
@@ -517,9 +655,21 @@ def split_sidewalks_by_protoblock_corners(sidewalks_gdf, protoblocks_gdf):
     return gdf
 
 
-def split_sidewalks_by_max_length(sidewalks_gdf, max_length):
-    """
-    Splits the sidewalks by a maximum length.
+def split_sidewalks_by_max_length(
+    sidewalks_gdf: gpd.GeoDataFrame, max_length: float
+) -> gpd.GeoDataFrame:
+    """Splits sidewalks into segments of a maximum length.
+
+    This function iterates through sidewalk lines and splits them into smaller
+    segments, ensuring that no segment is longer than the specified maximum
+    length.
+
+    Args:
+        sidewalks_gdf: A GeoDataFrame of sidewalk lines.
+        max_length: The maximum length of each sidewalk segment.
+
+    Returns:
+        A new GeoDataFrame containing the split sidewalk segments.
     """
     new_sidewalks = []
     for i, row in sidewalks_gdf.iterrows():
@@ -540,9 +690,17 @@ def split_sidewalks_by_max_length(sidewalks_gdf, max_length):
     return gdf
 
 
-def split_sidewalks_by_num_segments(sidewalks_gdf, num_segments):
-    """
-    Splits the sidewalks into a number of segments.
+def split_sidewalks_by_num_segments(
+    sidewalks_gdf: gpd.GeoDataFrame, num_segments: int
+) -> gpd.GeoDataFrame:
+    """Splits sidewalks into a specified number of equal-length segments.
+
+    Args:
+        sidewalks_gdf: A GeoDataFrame of sidewalk lines.
+        num_segments: The number of segments to split each sidewalk into.
+
+    Returns:
+        A new GeoDataFrame containing the split sidewalk segments.
     """
     new_sidewalks = []
     for i, row in sidewalks_gdf.iterrows():
@@ -562,15 +720,29 @@ def split_sidewalks_by_num_segments(sidewalks_gdf, num_segments):
 
 
 def split_sidewalks_gdf(
-    sidewalks_gdf,
-    intersection_points_gdf,
-    protoblocks_gdf,
-    pois_gdf,
-    max_length=None,
-    num_segments=None,
-):
-    """
-    Splits the sidewalks at the intersection points.
+    sidewalks_gdf: gpd.GeoDataFrame,
+    intersection_points_gdf: gpd.GeoDataFrame,
+    protoblocks_gdf: gpd.GeoDataFrame,
+    pois_gdf: gpd.GeoDataFrame,
+    max_length: float = None,
+    num_segments: int = None,
+) -> gpd.GeoDataFrame:
+    """Splits sidewalks based on multiple criteria.
+
+    This function orchestrates the splitting of sidewalks based on protoblock
+    corners, Voronoi polygons from POIs, maximum length, and a specified number
+    of segments.
+
+    Args:
+        sidewalks_gdf: A GeoDataFrame of sidewalk lines.
+        intersection_points_gdf: A GeoDataFrame of intersection points.
+        protoblocks_gdf: A GeoDataFrame of protoblock polygons.
+        pois_gdf: A GeoDataFrame of POIs.
+        max_length: The maximum length of each sidewalk segment.
+        num_segments: The number of segments to split each sidewalk into.
+
+    Returns:
+        A new GeoDataFrame containing the comprehensively split sidewalk segments.
     """
     sidewalks_gdf = split_sidewalks_by_protoblock_corners(
         sidewalks_gdf, protoblocks_gdf
@@ -639,9 +811,17 @@ def split_sidewalks_gdf(
     return gdf
 
 
-def calculate_sidewalk_properties(sidewalks_gdf):
-    """
-    Calculates properties for the sidewalks, such as area and perimeter.
+def calculate_sidewalk_properties(sidewalks_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Calculates geometric properties for the sidewalks.
+
+    This function calculates the area and perimeter for each sidewalk polygon and
+    adds them as new columns to the GeoDataFrame.
+
+    Args:
+        sidewalks_gdf: A GeoDataFrame of sidewalk polygons.
+
+    Returns:
+        The input GeoDataFrame with "area" and "perimeter" columns added.
     """
     sidewalks_gdf["area"] = sidewalks_gdf.geometry.area
     sidewalks_gdf["perimeter"] = sidewalks_gdf.geometry.length
@@ -662,9 +842,27 @@ def generate_kerbs_gdf(crossings_gdf):
     return gpd.GeoDataFrame(geometry=kerbs, crs=crossings_gdf.crs)
 
 
-def draw_sidewalks_gdf(gdf, buildings_gdf, streets_gdf, buffer_dist):
-    """
-    Generates sidewalks by buffering the street lines.
+def draw_sidewalks_gdf(
+    gdf: gpd.GeoDataFrame,
+    buildings_gdf: gpd.GeoDataFrame,
+    streets_gdf: gpd.GeoDataFrame,
+    buffer_dist: float,
+) -> gpd.GeoDataFrame:
+  """
+   Generates sidewalks by buffering street lines.
+
+    This function creates sidewalk polygons by buffering street lines. It adjusts
+    the buffer distance based on proximity to buildings and handles exclusion
+    zones.
+
+    Args:
+        gdf: A GeoDataFrame of street lines to buffer.
+        buildings_gdf: A GeoDataFrame of building polygons.
+        streets_gdf: A GeoDataFrame of streets, used for exclusion zones.
+        buffer_dist: The default buffer distance.
+
+    Returns:
+        A new GeoDataFrame containing the generated sidewalk polygons.
     """
     # Adjust buffer distance for buildings
     gdf = adjust_buffer_for_buildings(gdf, buildings_gdf, buffer_dist)
@@ -682,9 +880,25 @@ def draw_sidewalks_gdf(gdf, buildings_gdf, streets_gdf, buffer_dist):
     return sidewalks_gdf
 
 
-def data_clean_gdf(gdf, default_widths, fallback_default_width):
-    """
-    Cleans the OSM data in a GeoDataFrame.
+def data_clean_gdf(
+    gdf: gpd.GeoDataFrame, default_widths: dict, fallback_default_width: float
+) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame, gpd.GeoDataFrame]:
+    """Cleans the OSM data in a GeoDataFrame.
+
+    This function performs several cleaning operations on the input OSM data,
+    including parsing tags, filtering by highway type, and separating existing
+    sidewalks and crossings.
+
+    Args:
+        gdf: The input GeoDataFrame of OSM data.
+        default_widths: A dictionary mapping highway types to default widths.
+        fallback_default_width: The default width to use for unknown highway types.
+
+    Returns:
+        A tuple containing:
+            - gdf: The cleaned GeoDataFrame.
+            - existing_sidewalks: A GeoDataFrame of existing sidewalks.
+            - existing_crossings: A GeoDataFrame of existing crossings.
     """
 
     # Parse other_tags

@@ -19,8 +19,17 @@ import geopandas as gpd
 logger = logging.getLogger(__name__)
 
 
-def _normalize_bbox(bbox: Tuple[float, float, float, float]) -> Tuple[float, float, float, float]:
-    # bbox is expected as (minx, miny, maxx, maxy)
+def _normalize_bbox(
+    bbox: Tuple[float, float, float, float]
+) -> Tuple[float, float, float, float]:
+    """Converts a (minx, miny, maxx, maxy) bbox to (north, south, east, west).
+
+    Args:
+        bbox: A tuple representing the bounding box as (minx, miny, maxx, maxy).
+
+    Returns:
+        A tuple representing the bounding box as (north, south, east, west).
+    """
     minx, miny, maxx, maxy = bbox
     south = miny
     west = minx

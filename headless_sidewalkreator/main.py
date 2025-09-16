@@ -26,14 +26,21 @@ from .parameters import *
 
 
 def run_headless(
-    input_polygon_path, output_directory, parameters_path=None, osm_gdf=None
+    input_polygon_path: str,
+    output_directory: str,
+    parameters_path: str = None,
+    osm_gdf: gpd.GeoDataFrame = None,
 ):
-    """
-    Main function for the headless execution of the sidewalk generation process.
+    """Main function for the headless execution of the sidewalk generation process.
 
-    :param input_polygon_path: Path to the GeoJSON file containing the input polygon.
-    :param output_directory: Directory where the output files will be saved.
-    :param parameters_path: Optional path to a JSON file with parameters.
+    This function orchestrates the entire sidewalk generation process, from
+    reading the input polygon to generating the final output files.
+
+    Args:
+        input_polygon_path: Path to the GeoJSON file containing the input polygon.
+        output_directory: Directory where the output files will be saved.
+        parameters_path: Optional path to a JSON file with parameters.
+        osm_gdf: Optional GeoDataFrame with OSM data to be used instead of fetching.
     """
 
     # Load parameters or use defaults
