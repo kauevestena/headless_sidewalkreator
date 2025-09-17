@@ -78,7 +78,7 @@ def test_main_cli_entrypoint(setup_test_dir):
     assert "Process complete" in result.stdout
 
 
-@patch('headless_sidewalkreator.main.fetch_street_network_for_bbox')
+@patch('headless_sidewalkreator.full_sidewalkreator_algorithm.fetch_street_network_for_bbox')
 def test_run_headless_with_params_and_no_mock_gdf(mock_fetch, setup_test_dir, osm_sample_gdf):
     """Test run_headless with a parameters file and no mock gdf."""
     test_dir = setup_test_dir

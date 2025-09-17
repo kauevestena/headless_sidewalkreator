@@ -17,7 +17,7 @@ from headless_sidewalkreator.generic_functions import (
     split_sidewalks_by_num_segments,
     draw_sidewalks_gdf,
     adjust_buffer_for_buildings,
-    handle_exclusion_zones,
+    handle_sidewalk_tags,
     calculate_crossing_direction,
     generate_kerbs_gdf,
 )
@@ -223,7 +223,7 @@ def test_draw_sidewalks_gdf(mock_adjust_buffer):
     adjusted_gdf['buffer_dist'] = 2
     mock_adjust_buffer.return_value = adjusted_gdf
 
-    sidewalks_gdf = draw_sidewalks_gdf(gdf, buildings_gdf, gdf, buffer_dist=2)
+    sidewalks_gdf = draw_sidewalks_gdf(gdf, buildings_gdf, gdf, buffer_dist=2, curve_radius=3.0)
     assert not sidewalks_gdf.empty
     mock_adjust_buffer.assert_called_once()
 
@@ -265,8 +265,8 @@ def test_filter_and_buffer_protoblocks_gdf():
     assert not filtered_gdf.empty
 
 
-def test_handle_exclusion_zones():
-    """Test handle_exclusion_zones."""
+def test_handle_sidewalk_tags():
+    """Test handle_sidewalk_tags."""
     sidewalks = [Polygon([(0, 0), (10, 0), (10, 2), (0, 2)])]
     sidewalks_gdf = gpd.GeoDataFrame(geometry=sidewalks, crs="EPSG:3857")
     streets = [LineString([(5, -1), (5, 3)])]
@@ -274,18 +274,18 @@ def test_handle_exclusion_zones():
         {"sidewalk": ["no"], "width": [2]}, geometry=streets, crs="EPSG:3857"
     )
 
-    filtered_sidewalks = handle_exclusion_zones(sidewalks_gdf, streets_gdf)
+    filtered_sidewalks = handle_sidewalk_tags(sidewalks_gdf, streets_gdf)
     assert not filtered_sidewalks.empty
     assert filtered_sidewalks.geometry.iloc[0].area < sidewalks_gdf.geometry.iloc[0].area
 
 
-def test_handle_exclusion_zones_no_exclusions():
-    """Test handle_exclusion_zones with no exclusion zones."""
+def test_handle_sidewalk_tags_no_exclusions():
+    """Test handle_sidewalk_tags with no exclusion zones."""
     sidewalks = [Polygon([(0, 0), (10, 0), (10, 2), (0, 2)])]
     sidewalks_gdf = gpd.GeoDataFrame(geometry=sidewalks, crs="EPSG:3857")
     streets_gdf = gpd.GeoDataFrame(geometry=[], crs="EPSG:3857")
 
-    filtered_sidewalks = handle_exclusion_zones(sidewalks_gdf, streets_gdf)
+    filtered_sidewalks = handle_sidewalk_tags(sidewalks_gdf, streets_gdf)
     assert filtered_sidewalks.equals(sidewalks_gdf)
 
 

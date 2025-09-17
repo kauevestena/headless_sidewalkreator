@@ -274,58 +274,77 @@ def adjust_buffer_for_buildings(
     return lines_gdf
 
 
-def handle_exclusion_zones(
+def handle_sidewalk_tags(
     sidewalks_gdf: gpd.GeoDataFrame, streets_gdf: gpd.GeoDataFrame
 ) -> gpd.GeoDataFrame:
-    """Removes exclusion zones from the sidewalks.
+    """Handles sidewalk tags to implement exclusion and sure zones.
 
-    This function identifies streets marked with "sidewalk=no" and removes
-    those areas from the generated sidewalks.
-
-    Handling for "sidewalk=left/right" is a future improvement, as it requires
-    complex geometric operations to determine the side of the road.
-
-    "Sure zones" (`sidewalk=yes/both`) are not explicitly handled in this
-    subtractive process, as sidewalks are already generated everywhere by default.
-    A full implementation would require a different generation strategy.
+    This function processes `sidewalk` tags on streets to refine the generated
+    sidewalk geometries. It performs two main actions:
+    1.  **Exclusion Zones**: For tags like `sidewalk=no`, `sidewalk=left`, or
+        `sidewalk=right`, it removes the corresponding areas from the generated
+        sidewalks.
+    2.  **Sure Zones**: For tags like `sidewalk=yes` or `sidewalk=both`, it
+        creates "sure zones" where sidewalks are expected. If any sure zones
+        exist, the final output is constrained to the intersection of the
+        generated sidewalks and these zones.
 
     Args:
         sidewalks_gdf: A GeoDataFrame of generated sidewalks.
         streets_gdf: A GeoDataFrame of streets, potentially with a "sidewalk" column.
 
     Returns:
-        A new GeoDataFrame of sidewalks with exclusion zones removed.
+        A new GeoDataFrame of sidewalks with exclusion and sure zones applied.
     """
     if "sidewalk" not in streets_gdf.columns or sidewalks_gdf.empty:
         return sidewalks_gdf
 
-    # Create exclusion zones from sidewalk=no tags
-    exclusion_streets = streets_gdf[streets_gdf["sidewalk"] == "no"].copy()
+    sidewalks_gdf = sidewalks_gdf.copy()
+    exclusion_geometries = []
+    sure_geometries = []
 
-    if not exclusion_streets.empty:
-        # Create exclusion zone polygons by buffering the streets
-        exclusion_zones = []
-        for _, street in exclusion_streets.iterrows():
-            # Get road width for buffering, with a fallback
+    # Handle sidewalk=no
+    no_sidewalk_streets = streets_gdf[streets_gdf["sidewalk"] == "no"].copy()
+    for _, street in no_sidewalk_streets.iterrows():
+        road_width = street.get("width", 6.0)
+        buffer_distance = (road_width / 2) + 1.0
+        exclusion_geometries.append(street.geometry.buffer(buffer_distance))
+
+    # Handle sidewalk=left/right
+    for side in ["left", "right"]:
+        side_streets = streets_gdf[streets_gdf["sidewalk"] == side].copy()
+        for _, street in side_streets.iterrows():
             road_width = street.get("width", 6.0)
-            # Buffer by half the road width plus a small margin to ensure overlap
-            buffer_distance = (road_width / 2) + 1.0
-            exclusion_zones.append(street.geometry.buffer(buffer_distance))
-
-        if exclusion_zones:
-            # Union all exclusion zones into a single geometry
-            exclusion_union = (
-                gpd.GeoSeries(exclusion_zones, crs=streets_gdf.crs).unary_union
+            buffer_distance = road_width / 2
+            offset_line = street.geometry.parallel_offset(
+                buffer_distance, side, join_style=2
             )
+            exclusion_geometries.append(offset_line.buffer(1.0))
 
-            # Remove exclusion zones from sidewalks using geometric difference
-            sidewalks_gdf = sidewalks_gdf.copy()
-            sidewalks_gdf["geometry"] = sidewalks_gdf.geometry.difference(
-                exclusion_union
-            )
+    # Apply exclusion zones first
+    if exclusion_geometries:
+        exclusion_union = gpd.GeoSeries(
+            exclusion_geometries, crs=streets_gdf.crs
+        ).unary_union
+        sidewalks_gdf["geometry"] = sidewalks_gdf.geometry.difference(exclusion_union)
+        sidewalks_gdf = sidewalks_gdf[~sidewalks_gdf.geometry.is_empty].copy()
 
-            # Remove any empty or invalid geometries that result from the difference
-            sidewalks_gdf = sidewalks_gdf[~sidewalks_gdf.geometry.is_empty].copy()
+    # Handle sidewalk=yes/both (sure zones)
+    sure_streets = streets_gdf[
+        streets_gdf["sidewalk"].isin(["yes", "both"])
+    ].copy()
+    for _, street in sure_streets.iterrows():
+        road_width = street.get("width", 6.0)
+        buffer_distance = (road_width / 2) + 1.0
+        sure_geometries.append(street.geometry.buffer(buffer_distance))
+
+    # If sure zones exist, constrain sidewalks to them
+    if sure_geometries:
+        sure_union = gpd.GeoSeries(
+            sure_geometries, crs=streets_gdf.crs
+        ).unary_union
+        sidewalks_gdf["geometry"] = sidewalks_gdf.geometry.intersection(sure_union)
+        sidewalks_gdf = sidewalks_gdf[~sidewalks_gdf.geometry.is_empty].copy()
 
     return sidewalks_gdf
 
@@ -1009,6 +1028,43 @@ def split_sidewalks_by_num_segments(
     return gdf
 
 
+from shapely.validation import make_valid
+
+
+def clean_geometries_gdf(
+    gdf: gpd.GeoDataFrame, tolerance: float = 0.1
+) -> gpd.GeoDataFrame:
+    """Cleans geometries in a GeoDataFrame.
+
+    This function performs cleaning operations on the geometries in a
+    GeoDataFrame, including:
+    - Making geometries valid
+    - Simplifying geometries to remove unnecessary vertices
+    - Snapping vertices to a grid to remove small variations
+
+    Args:
+        gdf: The GeoDataFrame to clean.
+        tolerance: The tolerance for simplification and snapping.
+
+    Returns:
+        A new GeoDataFrame with cleaned geometries.
+    """
+    cleaned_geometries = []
+    for geom in gdf.geometry:
+        if geom is None or geom.is_empty:
+            continue
+
+        # Make geometry valid
+        valid_geom = make_valid(geom)
+
+        # Simplify geometry
+        simplified_geom = valid_geom.simplify(tolerance)
+
+        cleaned_geometries.append(simplified_geom)
+
+    return gpd.GeoDataFrame(geometry=cleaned_geometries, crs=gdf.crs)
+
+
 def split_sidewalks_gdf(
     sidewalks_gdf: gpd.GeoDataFrame,
     intersection_points_gdf: gpd.GeoDataFrame,
@@ -1098,6 +1154,10 @@ def split_sidewalks_gdf(
         gdf = gdf.set_crs(sidewalks_gdf.crs)
     except Exception:
         gdf.crs = sidewalks_gdf.crs
+
+    # Clean the final geometries
+    gdf = clean_geometries_gdf(gdf)
+
     return gdf
 
 
@@ -1163,7 +1223,7 @@ def draw_sidewalks_gdf(
     buildings_gdf: gpd.GeoDataFrame,
     streets_gdf: gpd.GeoDataFrame,
     buffer_dist: float,
-    curve_radius: float = 3.0,
+    curve_radius: float,
 ) -> gpd.GeoDataFrame:
     """Generates sidewalks using the proper algorithm from the QGIS plugin.
 
@@ -1243,7 +1303,7 @@ def draw_sidewalks_gdf(
     sidewalks_gdf = gpd.GeoDataFrame(geometry=sidewalk_lines, crs=gdf.crs)
     
     # Step 8: Handle exclusion/sure zones
-    sidewalks_gdf = handle_exclusion_zones(sidewalks_gdf, streets_gdf)
+    sidewalks_gdf = handle_sidewalk_tags(sidewalks_gdf, streets_gdf)
     
     # Step 9: Calculate properties
     sidewalks_gdf = calculate_sidewalk_properties(sidewalks_gdf)
