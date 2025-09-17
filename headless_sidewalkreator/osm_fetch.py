@@ -122,7 +122,13 @@ def get_osm_data(bbox: Tuple[float, float, float, float], tags: Optional[Dict[st
     last_exc = None
     while attempt <= max_retries:
         try:
-            result = fetch_func(north, south, east, west, tags)
+            # Handle different OSMnx function signatures
+            if fetch_func.__name__ == 'features_from_bbox':
+                # Newer OSMnx 2.x uses bbox tuple format
+                result = fetch_func((north, south, east, west), tags)
+            else:
+                # Older OSMnx used separate arguments
+                result = fetch_func(north, south, east, west, tags)
 
             # OSMnx may return a GeoDataFrame, a Pandas DataFrame-like, or in
             # some calls a NetworkX graph (if other ox functions are used).
