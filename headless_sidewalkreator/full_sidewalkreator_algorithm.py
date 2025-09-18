@@ -31,6 +31,7 @@ def full_sidewalkreator_algorithm(
     output_directory: str,
     parameters_path: str = None,
     osm_gdf: gpd.GeoDataFrame = None,
+    ignore_existing: bool = False,
 ):
     """Main function for the headless execution of the sidewalk generation process.
 
@@ -42,6 +43,8 @@ def full_sidewalkreator_algorithm(
         output_directory: Directory where the output files will be saved.
         parameters_path: Optional path to a JSON file with parameters.
         osm_gdf: Optional GeoDataFrame with OSM data to be used instead of fetching.
+        ignore_existing: If True, ignores existing sidewalks and generates all
+            possible sidewalks without filtering based on pre-existing coverage.
     """
 
     # Consolidate parameters
@@ -108,7 +111,7 @@ def full_sidewalkreator_algorithm(
 
     # 10. Filter and buffer protoblocks
     filtered_protoblocks_gdf = filter_and_buffer_protoblocks_gdf(
-        protoblocks_gdf, existing_sidewalks
+        protoblocks_gdf, existing_sidewalks, ignore_existing=ignore_existing
     )
 
     # 11. Separate buildings, addresses, and other POIs

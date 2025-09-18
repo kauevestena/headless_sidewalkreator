@@ -460,6 +460,7 @@ def filter_and_buffer_protoblocks_gdf(
     protoblocks_gdf: gpd.GeoDataFrame,
     sidewalks_gdf: gpd.GeoDataFrame,
     cutoff_percent: int = 50,
+    ignore_existing: bool = False,
 ) -> gpd.GeoDataFrame:
     """Filters and buffers the protoblocks based on sidewalk coverage.
 
@@ -472,11 +473,13 @@ def filter_and_buffer_protoblocks_gdf(
         sidewalks_gdf: A GeoDataFrame of existing sidewalk polygons.
         cutoff_percent: The percentage of sidewalk area above which a
             protoblock will be filtered out.
+        ignore_existing: If True, skips filtering based on existing sidewalks
+            and returns all protoblocks (dissolved and buffered).
 
     Returns:
         A GeoDataFrame containing the filtered and buffered protoblocks.
     """
-    if sidewalks_gdf.empty:
+    if ignore_existing or sidewalks_gdf.empty:
         return protoblocks_gdf.dissolve().buffer(0.1)
 
     # Calculate sidewalk area and store it in a new column
