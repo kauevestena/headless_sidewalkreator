@@ -7,6 +7,57 @@ functions. The package has been reorganized into a Python package layout
 (`headless_sidewalkreator/`) and includes runtime and development
 requirements files.
 
+## API Overview
+
+The library now provides two ways to use the sidewalk generation algorithm:
+
+### 1. GeoDataFrame-based API (Recommended)
+
+The new `generate_sidewalks_gdf()` function accepts and returns GeoDataFrames, giving users full control over I/O:
+
+```python
+from headless_sidewalkreator import generate_sidewalks_gdf
+import geopandas as gpd
+
+# User loads their own data
+input_polygon_gdf = gpd.read_file("area_of_interest.geojson")
+osm_data_gdf = gpd.read_file("osm_streets.geojson")  # Optional
+
+# Generate sidewalks
+result = generate_sidewalks_gdf(
+    input_polygon_gdf=input_polygon_gdf,
+    osm_gdf=osm_data_gdf,  # If None, will fetch from OSM automatically
+    parameters={"buffer_dist": 2.0},  # Optional custom parameters
+    ignore_existing=False
+)
+
+# Extract results - all are GeoDataFrames
+sidewalks = result['sidewalks']
+crossings = result['crossings'] 
+kerbs = result['kerbs']
+protoblocks = result['protoblocks']  # For analysis/debugging
+parameters_used = result['parameters']
+
+# User handles output as needed
+sidewalks.to_file("output_sidewalks.geojson")
+crossings.to_file("output_crossings.gpkg")
+```
+
+### 2. File-based API (Legacy)
+
+The original `run_headless()` function still works for backward compatibility:
+
+```python
+from headless_sidewalkreator import run_headless
+
+# Original file-based interface
+run_headless(
+    input_polygon_path="input.geojson",
+    output_directory="output/",
+    parameters_path="params.json"  # Optional
+)
+```
+
 ## Development setup
 
 Modern versions of geopandas and related geospatial libraries come with

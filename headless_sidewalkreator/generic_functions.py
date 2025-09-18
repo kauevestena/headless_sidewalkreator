@@ -480,7 +480,9 @@ def filter_and_buffer_protoblocks_gdf(
         A GeoDataFrame containing the filtered and buffered protoblocks.
     """
     if ignore_existing or sidewalks_gdf.empty:
-        return protoblocks_gdf.dissolve().buffer(0.1)
+        dissolved = protoblocks_gdf.dissolve()
+        buffered = dissolved.buffer(0.1)
+        return gpd.GeoDataFrame(geometry=buffered, crs=protoblocks_gdf.crs)
 
     # Calculate sidewalk area and store it in a new column
     sidewalks_with_area_gdf = sidewalks_gdf.copy()
@@ -514,7 +516,7 @@ def filter_and_buffer_protoblocks_gdf(
     dissolved_protoblocks = filtered_protoblocks.dissolve()
     buffered_protoblocks = dissolved_protoblocks.buffer(0.1)
 
-    return buffered_protoblocks
+    return gpd.GeoDataFrame(geometry=buffered_protoblocks, crs=protoblocks_gdf.crs)
 
 
 import math
