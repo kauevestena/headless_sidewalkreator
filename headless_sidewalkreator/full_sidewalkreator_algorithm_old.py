@@ -131,7 +131,9 @@ def generate_sidewalks_gdf(
 
     # 10. Remove lines from no-block zones if ignore_existing is False
     if not ignore_existing:
-        sidewalks_gdf = remove_lines_from_no_block_gdf(sidewalks_gdf)
+        sidewalks_gdf = remove_lines_from_no_block_gdf(
+            sidewalks_gdf, existing_sidewalks, buffer_distance=1.0
+        )
 
     # 11. Filter and buffer protoblocks
     protoblocks_gdf = filter_and_buffer_protoblocks_gdf(
@@ -182,8 +184,6 @@ def full_sidewalkreator_algorithm(
 
     This function orchestrates the entire sidewalk generation process, from
     reading the input polygon to generating the final output files.
-    
-    This is a file-based wrapper around generate_sidewalks_gdf() for backward compatibility.
 
     Args:
         input_polygon_path: Path to the GeoJSON file containing the input polygon.
@@ -194,11 +194,21 @@ def full_sidewalkreator_algorithm(
             possible sidewalks without filtering based on pre-existing coverage.
     """
 
-    # Load parameters from file if provided
-    parameters = {}
+    # Consolidate parameters
+    run_params = {
+        "timeout": 60,
+        "default_widths": default_widths,
+        "fallback_default_width": fallback_default_width,
+        "default_curve_radius": default_curve_radius,
+        "buffer_dist": 2,
+        "split_max_len": None,
+        "split_num_segments": None,
+    }
+
     if parameters_path and os.path.exists(parameters_path):
         with open(parameters_path, "r") as f:
-            parameters = json.load(f)
+            user_params = json.load(f)
+        run_params.update(user_params)
 
     # Create output directory if it doesn't exist
     if not os.path.exists(output_directory):
@@ -207,23 +217,106 @@ def full_sidewalkreator_algorithm(
     # 1. Load input polygon
     input_gdf = read_input_polygon(input_polygon_path)
 
-    # 2. Use the new GeoDataFrame-based API
-    result = generate_sidewalks_gdf(
-        input_polygon_gdf=input_gdf,
-        osm_gdf=osm_gdf,
-        parameters=parameters,
-        ignore_existing=ignore_existing
-    )
-    
-    # Extract results
-    splitted_sidewalks_gdf = result['sidewalks']
-    crossings_gdf = result['crossings']
-    kerbs_gdf = result['kerbs']
-    protoblocks_gdf = result['protoblocks']
-    intersection_points_gdf = result['intersection_points']
-    run_params = result['parameters']
+    # 2. Get bounding box
+    bbox = get_bbox_from_gdf(input_gdf)
 
-    # 3. Write outputs to files for backward compatibility
+    # 3. Fetch OSM Data (allow injection for tests via `osm_gdf`)
+    if osm_gdf is None:
+        osm_gdf = fetch_street_network_for_bbox(bbox, timeout=run_params["timeout"])
+
+    print(f"Number of features in osm_gdf: {len(osm_gdf)}")
+    print(f"Columns in osm_gdf: {osm_gdf.columns}")
+    print(f"CRS of osm_gdf: {osm_gdf.crs}")
+    print(f"Bbox of osm_gdf: {osm_gdf.total_bounds}")
+    print(f"CRS of input_gdf: {input_gdf.crs}")
+    print(f"Bbox of input_gdf: {input_gdf.total_bounds}")
+
+    # 4. Clip data
+    clipped_gdf = clip_gdf(osm_gdf, input_gdf)
+
+    # 5. Reproject to a local TM
+    utm_crs = input_gdf.estimate_utm_crs()
+    clipped_reproj_gdf = reproject_gdf(clipped_gdf, utm_crs)
+
+    print(f"Number of features in clipped_reproj_gdf: {len(clipped_reproj_gdf)}")
+    # 6. Clean data
+    cleaned_gdf, existing_sidewalks, existing_crossings = data_clean_gdf(
+        clipped_reproj_gdf,
+        run_params["default_widths"],
+        run_params["fallback_default_width"],
+    )
+
+    # 7. Split lines at intersections
+    lines_gdf = cleaned_gdf[cleaned_gdf.geometry.type == "LineString"].copy()
+    splitted_gdf = split_lines_at_intersections(lines_gdf)
+
+    # 8. Remove lines that do not form a block
+    cleaned_splitted_gdf = remove_lines_from_no_block_gdf(splitted_gdf)
+
+    # 9. Polygonize to create protoblocks
+    protoblocks_gdf = polygonize_lines_gdf(cleaned_splitted_gdf)
+
+    # 10. Filter and buffer protoblocks
+    filtered_protoblocks_gdf = filter_and_buffer_protoblocks_gdf(
+        protoblocks_gdf, existing_sidewalks, ignore_existing=ignore_existing
+    )
+
+    # 11. Separate buildings, addresses, and other POIs
+    buildings_gdf = osm_gdf[osm_gdf["building"].notna()].copy()
+    if "addr:housenumber" in osm_gdf.columns:
+        addresses_gdf = osm_gdf[osm_gdf["addr:housenumber"].notna()].copy()
+    else:
+        addresses_gdf = gpd.GeoDataFrame(geometry=[], crs=osm_gdf.crs)
+
+    other_pois_gdf = osm_gdf[
+        osm_gdf["amenity"].notna() | osm_gdf["shop"].notna()
+    ].copy()
+
+    # Create a unified POI layer for sidewalk splitting
+    poi_layers = []
+    if not buildings_gdf.empty:
+        building_centroids = buildings_gdf.copy()
+        building_centroids["geometry"] = building_centroids.geometry.centroid
+        poi_layers.append(building_centroids)
+    if not addresses_gdf.empty:
+        poi_layers.append(addresses_gdf)
+    if not other_pois_gdf.empty:
+        poi_layers.append(other_pois_gdf)
+
+    if poi_layers:
+        unified_pois_gdf = gpd.pd.concat(poi_layers, ignore_index=True)
+    else:
+        unified_pois_gdf = gpd.GeoDataFrame(geometry=[])
+
+    # 12. Draw sidewalks using proper algorithm
+    sidewalks_gdf = draw_sidewalks_gdf(
+        cleaned_splitted_gdf,
+        buildings_gdf,
+        cleaned_gdf,
+        buffer_dist=run_params["buffer_dist"],
+        curve_radius=run_params["default_curve_radius"],
+    )
+
+    # Handle sidewalk tags
+    sidewalks_gdf = handle_sidewalk_tags(sidewalks_gdf, cleaned_gdf)
+
+    # 13. Draw crossings using ABCDE algorithm
+    crossings_gdf = draw_crossings_gdf(splitted_gdf, sidewalks_gdf)
+
+    # 14. Split sidewalks
+    intersection_points_gdf = gpd.GeoDataFrame(
+        geometry=crossings_gdf.centroid, crs=crossings_gdf.crs
+    )
+    splitted_sidewalks_gdf = split_sidewalks_gdf(
+        sidewalks_gdf,
+        intersection_points_gdf,
+        protoblocks_gdf,
+        unified_pois_gdf,  # Use the new unified POI layer
+        max_length=run_params.get("split_max_len"),
+        num_segments=run_params.get("split_num_segments"),
+    )
+
+    # 14. Output results
     # Save auxiliary files
     auxiliary_output_directory = os.path.join(output_directory, "auxiliary")
     if not os.path.exists(auxiliary_output_directory):
@@ -264,11 +357,13 @@ def full_sidewalkreator_algorithm(
         with open(crossings_output_path, "w") as f:
             json.dump(empty_geojson, f)
 
+    # 15. Generate kerbs
+    kerbs_gdf = generate_kerbs_gdf(crossings_gdf)
     kerbs_output_path = os.path.join(output_directory, "kerbs_output.geojson")
     if not kerbs_gdf.empty:
         kerbs_gdf.to_crs("EPSG:4326").to_file(kerbs_output_path, driver="GeoJSON")
 
-    # Create merged output file (following QGIS plugin behavior)
+    # 16. Create merged output file (following QGIS plugin behavior)
     create_merged_output(
         output_directory,
         splitted_sidewalks_gdf if not splitted_sidewalks_gdf.empty else None,
@@ -276,7 +371,7 @@ def full_sidewalkreator_algorithm(
         kerbs_gdf if not kerbs_gdf.empty else None,
     )
 
-    # Save parameters to a file
+    # 17. Save parameters to a file
     params_output_path = os.path.join(output_directory, "parameters.json")
     with open(params_output_path, "w") as f:
         json.dump(run_params, f, indent=4)
