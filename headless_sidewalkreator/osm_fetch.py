@@ -78,7 +78,7 @@ def osm_query_string_by_bbox(bbox: Tuple[float, float, float, float], tags: Opti
 
 
 def get_osm_data(bbox: Tuple[float, float, float, float], tags: Optional[Dict[str, object]] = None, timeout: int = 60, max_retries: int = 2) -> gpd.GeoDataFrame:
-    """Fetch OSM data for a bbox using OSMnx `geometries_from_bbox`.
+    """Fetch OSM data for a bbox using OSMnx `features_from_bbox`.
 
     Args:
         bbox: (minx, miny, maxx, maxy)
@@ -99,36 +99,24 @@ def get_osm_data(bbox: Tuple[float, float, float, float], tags: Optional[Dict[st
             "addr:housenumber": True,
         }
 
-    # Prefer the new OSMnx features API when available; fall back to
-    # older geometries_* names for backward compatibility. The
-    # functions accept (north, south, east, west, tags).
+    # Use the modern OSMnx features API.
+    # The features_from_bbox function is preferred. It was introduced in
+    # OSMnx 1.2.0, and this package requires >=1.4.
     fetch_func = None
-    # Newer OSMnx may expose a top-level helper `features_from_bbox`.
     if hasattr(ox, "features_from_bbox"):
-        fetch_func = getattr(ox, "features_from_bbox")
-    # Older API used `geometries_from_bbox` at top-level
-    elif hasattr(ox, "geometries_from_bbox"):
-        fetch_func = getattr(ox, "geometries_from_bbox")
-    # Or OSMnx may expose a `features` module with the function
+        fetch_func = ox.features_from_bbox
     elif hasattr(ox, "features") and hasattr(ox.features, "features_from_bbox"):
-        fetch_func = getattr(ox.features, "features_from_bbox")
-    elif hasattr(ox, "features") and hasattr(ox.features, "geometries_from_bbox"):
-        fetch_func = getattr(ox.features, "geometries_from_bbox")
-
-    if fetch_func is None:
-        raise RuntimeError("No suitable OSMnx bbox fetch function found (features_from_bbox or geometries_from_bbox)")
+        fetch_func = ox.features.features_from_bbox
+    else:
+        # This path should not be taken with modern OSMnx versions.
+        raise RuntimeError("No suitable OSMnx bbox fetch function found (features_from_bbox)")
 
     attempt = 0
     last_exc = None
     while attempt <= max_retries:
         try:
-            # Handle different OSMnx function signatures
-            if fetch_func.__name__ == 'features_from_bbox':
-                # Newer OSMnx 2.x uses bbox tuple format
-                result = fetch_func((north, south, east, west), tags)
-            else:
-                # Older OSMnx used separate arguments
-                result = fetch_func(north, south, east, west, tags)
+            # The modern features_from_bbox API uses a bbox tuple.
+            result = fetch_func((north, south, east, west), tags)
 
             # OSMnx may return a GeoDataFrame, a Pandas DataFrame-like, or in
             # some calls a NetworkX graph (if other ox functions are used).

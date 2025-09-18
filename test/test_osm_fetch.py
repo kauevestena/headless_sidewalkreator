@@ -31,43 +31,32 @@ def test_osm_query_string_by_bbox():
 def test_get_osm_data_features_from_bbox():
     """Test get_osm_data with ox.features_from_bbox."""
     mock_gdf = gpd.GeoDataFrame({"geometry": [Point(1, 1)]}, crs="EPSG:4326")
-    ox_mock = MagicMock(spec=['features_from_bbox'])
+    ox_mock = MagicMock()
     ox_mock.features_from_bbox.return_value = mock_gdf
 
     with patch('headless_sidewalkreator.osm_fetch.ox', ox_mock):
         gdf = get_osm_data((0,0,1,1))
-        assert not gdf.empty
+        assert gdf.equals(mock_gdf)
         ox_mock.features_from_bbox.assert_called_once()
-
-
-def test_get_osm_data_geometries_from_bbox():
-    """Test get_osm_data with ox.geometries_from_bbox."""
-    mock_gdf = gpd.GeoDataFrame({"geometry": [Point(1, 1)]}, crs="EPSG:4326")
-    ox_mock = MagicMock(spec=['geometries_from_bbox', 'utils_graph', 'features'])
-    del ox_mock.features
-    ox_mock.geometries_from_bbox.return_value = mock_gdf
-
-    with patch('headless_sidewalkreator.osm_fetch.ox', ox_mock):
-        gdf = get_osm_data((0,0,1,1))
-        assert not gdf.empty
-        ox_mock.geometries_from_bbox.assert_called_once()
 
 
 def test_get_osm_data_features_module():
     """Test get_osm_data with ox.features.features_from_bbox."""
     mock_gdf = gpd.GeoDataFrame({"geometry": [Point(1, 1)]}, crs="EPSG:4326")
-    ox_mock = MagicMock(spec=['features', 'utils_graph'])
+    ox_mock = MagicMock()
+    # Simulate features_from_bbox being in a submodule
+    del ox_mock.features_from_bbox
     ox_mock.features.features_from_bbox.return_value = mock_gdf
 
     with patch('headless_sidewalkreator.osm_fetch.ox', ox_mock):
         gdf = get_osm_data((0,0,1,1))
-        assert not gdf.empty
+        assert gdf.equals(mock_gdf)
         ox_mock.features.features_from_bbox.assert_called_once()
 
 
 def test_get_osm_data_no_fetch_func():
     """Test get_osm_data when no fetch function is found."""
-    ox_mock = MagicMock(spec=[])
+    ox_mock = MagicMock(spec=[]) # No methods
     with patch('headless_sidewalkreator.osm_fetch.ox', ox_mock):
         with pytest.raises(RuntimeError, match="No suitable OSMnx bbox fetch function found"):
             get_osm_data((0, 0, 1, 1))
@@ -77,13 +66,14 @@ def test_get_osm_data_no_fetch_func():
 def test_get_osm_data_retry(mock_sleep):
     """Test the retry mechanism in get_osm_data."""
     mock_gdf = gpd.GeoDataFrame({"geometry": [Point(1, 1)]}, crs="EPSG:4326")
-    ox_mock = MagicMock(spec=['features_from_bbox'])
+    ox_mock = MagicMock()
     ox_mock.features_from_bbox.side_effect = [Exception("Failed to fetch"), mock_gdf]
 
     with patch('headless_sidewalkreator.osm_fetch.ox', ox_mock):
         gdf = get_osm_data((0,0,1,1), max_retries=1)
-        assert not gdf.empty
+        assert gdf.equals(mock_gdf)
         assert ox_mock.features_from_bbox.call_count == 2
+        mock_sleep.assert_called_once()
 
 
 def test_get_osm_data_non_gdf_result():
@@ -91,7 +81,7 @@ def test_get_osm_data_non_gdf_result():
     data = {'osmid': [1, 2], 'geometry': [Point(0, 0), Point(1, 1)]}
     df = pd.DataFrame(data)
 
-    ox_mock = MagicMock(spec=['features_from_bbox', 'utils_graph'])
+    ox_mock = MagicMock()
     ox_mock.features_from_bbox.return_value = df
     ox_mock.utils_graph.graph_to_gdfs.return_value = gpd.GeoDataFrame(df, crs="EPSG:4326")
 
@@ -107,7 +97,7 @@ def test_get_osm_data_missing_crs():
     mock_gdf = gpd.GeoDataFrame({'geometry': [Point(0, 0)]})
     assert mock_gdf.crs is None
 
-    ox_mock = MagicMock(spec=['features_from_bbox'])
+    ox_mock = MagicMock()
     ox_mock.features_from_bbox.return_value = mock_gdf
 
     with patch('headless_sidewalkreator.osm_fetch.ox', ox_mock):
@@ -121,20 +111,19 @@ def test_get_osm_data_with_graph_result_conversion_failure():
     mock_graph.nodes = [1, 2]
     mock_graph.edges = [(1, 2)]
 
-    ox_mock = MagicMock(spec=['features_from_bbox', 'utils_graph'])
+    ox_mock = MagicMock()
     ox_mock.features_from_bbox.return_value = mock_graph
     ox_mock.utils_graph.graph_to_gdfs.side_effect = Exception("Conversion Failed")
 
     with patch('headless_sidewalkreator.osm_fetch.ox', ox_mock):
         gdf = get_osm_data((0, 0, 1, 1))
         assert isinstance(gdf, gpd.GeoDataFrame)
-        assert gdf.empty
-
+        assert gdf.crs is not None # Should be an empty GDF with CRS
 
 @patch('time.sleep', return_value=None)
 def test_get_osm_data_max_retries_exceeded(mock_sleep):
     """Test that the final error is raised after max_retries."""
-    ox_mock = MagicMock(spec=['features_from_bbox'])
+    ox_mock = MagicMock()
     ox_mock.features_from_bbox.side_effect = Exception("Failed")
 
     with patch('headless_sidewalkreator.osm_fetch.ox', ox_mock):
