@@ -325,7 +325,7 @@ def handle_sidewalk_tags(
     if exclusion_geometries:
         exclusion_union = gpd.GeoSeries(
             exclusion_geometries, crs=streets_gdf.crs
-        ).unary_union
+        ).union_all()
         sidewalks_gdf["geometry"] = sidewalks_gdf.geometry.difference(exclusion_union)
         sidewalks_gdf = sidewalks_gdf[~sidewalks_gdf.geometry.is_empty].copy()
 
@@ -342,7 +342,7 @@ def handle_sidewalk_tags(
     if sure_geometries:
         sure_union = gpd.GeoSeries(
             sure_geometries, crs=streets_gdf.crs
-        ).unary_union
+        ).union_all()
         sidewalks_gdf["geometry"] = sidewalks_gdf.geometry.intersection(sure_union)
         sidewalks_gdf = sidewalks_gdf[~sidewalks_gdf.geometry.is_empty].copy()
 
