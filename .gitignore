@@ -70,6 +70,7 @@ instance/
 
 # Sphinx documentation
 docs/_build/
+docs/build/
 
 # PyBuilder
 target/
@@ -172,3 +173,4 @@ test/__pycache__/
 # OSMNX cache
 cache/
 .vscode/settings.json
+docs/build

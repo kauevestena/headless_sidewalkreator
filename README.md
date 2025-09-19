@@ -130,6 +130,23 @@ python -c "from headless_sidewalkreator import run_headless; print(run_headless.
 If you'd like, I can add a Makefile or small helper scripts to automate
 these steps.
 
+## Documentation
+
+The documentation for this project is built using Sphinx. To build the documentation locally, first install the documentation dependencies:
+
+```bash
+pip install -r requirements-docs.txt
+```
+
+Then, navigate to the `docs` directory and build the HTML pages:
+
+```bash
+cd docs
+make html
+```
+
+The generated documentation can be found in `docs/build/html/index.html`.
+
 [REPO IN PROGRESS]
 
 This is the headless version of a QGIS Plugin called OSM Sidewalkreator, available at:
