@@ -52,6 +52,7 @@ def generate_sidewalks_gdf(
         - 'kerbs': Kerb point geometries
         - 'protoblocks': Intermediate protoblocks (for debugging)
         - 'intersection_points': Intersection points used in processing
+        - 'pois': Points of interest (building centroids, addresses, amenities) 
         - 'parameters': Runtime parameters that were used
     """
     
@@ -110,10 +111,41 @@ def generate_sidewalks_gdf(
     # 8. Create protoblocks from polygonizing
     protoblocks_gdf = polygonize_lines_gdf(splitted_gdf)
 
-    # 9. Draw sidewalks
+    # 9. Extract POI data (buildings, addresses, other POIs)
     buildings_gdf = cleaned_gdf[
         (cleaned_gdf["building"].notna()) & (cleaned_gdf["building"] != "")
     ].copy()
+    
+    # Extract address nodes
+    if "addr:housenumber" in clipped_reproj_gdf.columns:
+        addresses_gdf = clipped_reproj_gdf[
+            clipped_reproj_gdf["addr:housenumber"].notna()
+        ].copy()
+    else:
+        addresses_gdf = gpd.GeoDataFrame(geometry=[], crs=clipped_reproj_gdf.crs)
+    
+    # Extract other POIs (amenities and shops)
+    other_pois_gdf = clipped_reproj_gdf[
+        clipped_reproj_gdf["amenity"].notna() | clipped_reproj_gdf["shop"].notna()
+    ].copy()
+    
+    # Create unified POI layer for sidewalk splitting
+    poi_layers = []
+    if not buildings_gdf.empty:
+        building_centroids = buildings_gdf.copy()
+        building_centroids["geometry"] = building_centroids.geometry.centroid
+        poi_layers.append(building_centroids)
+    if not addresses_gdf.empty:
+        poi_layers.append(addresses_gdf)
+    if not other_pois_gdf.empty:
+        poi_layers.append(other_pois_gdf)
+    
+    if poi_layers:
+        unified_pois_gdf = gpd.pd.concat(poi_layers, ignore_index=True)
+    else:
+        unified_pois_gdf = gpd.GeoDataFrame(geometry=[], crs=clipped_reproj_gdf.crs)
+
+    # 10. Draw sidewalks
     streets_gdf = cleaned_gdf[
         (cleaned_gdf["highway"].notna()) & (cleaned_gdf["highway"] != "")
     ].copy()
@@ -129,19 +161,19 @@ def generate_sidewalks_gdf(
     # Handle sidewalk tags
     sidewalks_gdf = handle_sidewalk_tags(sidewalks_gdf, cleaned_gdf)
 
-    # 10. Remove lines from no-block zones if ignore_existing is False
+    # 11. Remove lines from no-block zones if ignore_existing is False
     if not ignore_existing:
         sidewalks_gdf = remove_lines_from_no_block_gdf(sidewalks_gdf)
 
-    # 11. Filter and buffer protoblocks
+    # 12. Filter and buffer protoblocks
     protoblocks_gdf = filter_and_buffer_protoblocks_gdf(
         protoblocks_gdf, sidewalks_gdf, ignore_existing=ignore_existing
     )
 
-    # 12. Draw crossings using ABCDE algorithm
+    # 13. Draw crossings using ABCDE algorithm
     crossings_gdf = draw_crossings_gdf(splitted_gdf, sidewalks_gdf)
 
-    # 13. Split sidewalks
+    # 14. Split sidewalks (now with POI integration)
     intersection_points_gdf = gpd.GeoDataFrame(
         geometry=crossings_gdf.centroid, crs=crossings_gdf.crs
     )
@@ -149,12 +181,12 @@ def generate_sidewalks_gdf(
         sidewalks_gdf,
         intersection_points_gdf,
         protoblocks_gdf,
-        gpd.GeoDataFrame(),  # Empty POIs for now
+        unified_pois_gdf,  # Now using the actual POI layer
         max_length=run_params["split_max_len"],
         num_segments=run_params["split_num_segments"],
     )
 
-    # 14. Generate kerbs
+    # 15. Generate kerbs
     kerbs_gdf = generate_kerbs_gdf(crossings_gdf)
 
     # Return all results as GeoDataFrames
@@ -164,6 +196,7 @@ def generate_sidewalks_gdf(
         'kerbs': kerbs_gdf,
         'protoblocks': protoblocks_gdf,
         'intersection_points': intersection_points_gdf,
+        'pois': unified_pois_gdf,  # Add POI data to output
         'parameters': run_params,
     }
     
@@ -221,6 +254,7 @@ def full_sidewalkreator_algorithm(
     kerbs_gdf = result['kerbs']
     protoblocks_gdf = result['protoblocks']
     intersection_points_gdf = result['intersection_points']
+    unified_pois_gdf = result['pois']
     run_params = result['parameters']
 
     # 3. Write outputs to files for backward compatibility
@@ -236,6 +270,13 @@ def full_sidewalkreator_algorithm(
     if not intersection_points_gdf.empty:
         intersection_points_gdf.to_crs("EPSG:4326").to_file(
             intersection_points_output_path, driver="GeoJSON"
+        )
+
+    # Save POI data (new feature)
+    pois_output_path = os.path.join(auxiliary_output_directory, "pois.geojson")
+    if not unified_pois_gdf.empty:
+        unified_pois_gdf.to_crs("EPSG:4326").to_file(
+            pois_output_path, driver="GeoJSON"
         )
 
     output_path = os.path.join(output_directory, "protoblocks_output.geojson")

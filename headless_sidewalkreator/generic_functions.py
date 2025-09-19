@@ -848,8 +848,12 @@ def split_sidewalks_by_voronoi(
     if pois_gdf.empty:
         return sidewalks_gdf
 
-    # Create Voronoi polygons
+    # Create Voronoi polygons - need at least 4 points for 2D Voronoi
     points = pois_gdf.geometry.apply(lambda p: (p.x, p.y)).tolist()
+    if len(points) < 4:
+        # Not enough points for Voronoi diagram, return original sidewalks
+        return sidewalks_gdf
+    
     vor = Voronoi(points)
 
     # Convert Voronoi polygons to shapely Polygons
