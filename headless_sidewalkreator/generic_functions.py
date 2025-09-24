@@ -199,6 +199,7 @@ def adjust_buffer_for_buildings(
     lines_gdf: gpd.GeoDataFrame,
     buildings_gdf: gpd.GeoDataFrame,
     default_buffer: float,
+    min_d_to_building: float,
 ) -> gpd.GeoDataFrame:
     """Adjusts the buffer distance for lines based on proximity to buildings.
 
@@ -210,12 +211,13 @@ def adjust_buffer_for_buildings(
         lines_gdf: A GeoDataFrame of lines to buffer.
         buildings_gdf: A GeoDataFrame of building polygons.
         default_buffer: The default buffer distance to use when no buildings are nearby.
+        min_d_to_building: The minimum required distance from a building.
 
     Returns:
         The input GeoDataFrame with an added "buffer_dist" column.
     """
-    from .parameters import min_d_to_building, minimal_buffer
-    
+    from .parameters import minimal_buffer
+
     if buildings_gdf.empty:
         lines_gdf = lines_gdf.copy()
         lines_gdf["buffer_dist"] = default_buffer
@@ -459,7 +461,7 @@ def remove_lines_from_no_block_gdf(
 def filter_and_buffer_protoblocks_gdf(
     protoblocks_gdf: gpd.GeoDataFrame,
     sidewalks_gdf: gpd.GeoDataFrame,
-    cutoff_percent: int = 50,
+    cutoff_percent: int,
     ignore_existing: bool = False,
 ) -> gpd.GeoDataFrame:
     """Filters and buffers the protoblocks based on sidewalk coverage.
@@ -571,7 +573,15 @@ def calculate_crossing_direction(point: Point, lines_df: gpd.GeoDataFrame) -> Po
     return Point(math.cos(angle), math.sin(angle))
 
 
-def draw_crossings_gdf(streets_gdf: gpd.GeoDataFrame, sidewalks_gdf: gpd.GeoDataFrame = None) -> gpd.GeoDataFrame:
+def draw_crossings_gdf(
+    streets_gdf: gpd.GeoDataFrame,
+    sidewalks_gdf: gpd.GeoDataFrame = None,
+    increment_inward: float = 0.5,
+    max_crossings_iterations: int = 20,
+    abs_max_crossing_len: int = 100,
+    perc_tol_crossings: int = 25,
+    perc_draw_kerbs: int = 30,
+) -> gpd.GeoDataFrame:
     """Generates crossings at the intersections using the ABCDE algorithm.
 
     This function implements the sophisticated crossing generation described in the
@@ -586,14 +596,15 @@ def draw_crossings_gdf(streets_gdf: gpd.GeoDataFrame, sidewalks_gdf: gpd.GeoData
     Args:
         streets_gdf: A GeoDataFrame of street lines.
         sidewalks_gdf: Optional GeoDataFrame of sidewalk lines for intersection testing.
+        increment_inward: Distance to move inward if crossing is too long.
+        max_crossings_iterations: Maximum attempts to find valid crossing.
+        abs_max_crossing_len: Absolute maximum crossing length.
+        perc_tol_crossings: Tolerance for crossing length validation.
+        perc_draw_kerbs: Percentage along crossing segments for kerb placement.
 
     Returns:
         A new GeoDataFrame containing the generated crossing lines.
     """
-    from .parameters import (
-        increment_inward, max_crossings_iterations, abs_max_crossing_len,
-        perc_tol_crossings, perc_draw_kerbs
-    )
     
     # Find all intersection points where 3+ roads meet
     intersections = streets_gdf.sindex.query(streets_gdf.geometry, predicate="intersects")
@@ -647,11 +658,18 @@ def draw_crossings_gdf(streets_gdf: gpd.GeoDataFrame, sidewalks_gdf: gpd.GeoData
                 # Try to generate crossing using ABCDE algorithm
                 try:
                     crossing = generate_crossing_abcde(
-                        intersection_point, road1, road2, streets_gdf.iloc[road1_idx], 
-                        sidewalks_gdf, increment_inward, max_crossings_iterations, 
-                        abs_max_crossing_len, perc_tol_crossings, perc_draw_kerbs
+                        intersection_point,
+                        road1,
+                        road2,
+                        streets_gdf.iloc[road1_idx],
+                        sidewalks_gdf,
+                        increment_inward,
+                        max_crossings_iterations,
+                        abs_max_crossing_len,
+                        perc_tol_crossings,
+                        perc_draw_kerbs,
                     )
-                    
+
                     if crossing is not None:
                         crossing_lines.append(crossing)
                 except Exception:
@@ -1028,7 +1046,7 @@ def split_sidewalks_by_max_length(
         if sidewalk.length > max_length:
             num_splits = int(sidewalk.length // max_length)
             splitter_points = [
-                sidewalk.interpolate((i + 1) * max_length) for i in range(num_splits)
+                sidewalk.interpolate((j + 1) * max_length) for j in range(num_splits)
             ]
             new_sidewalk_parts = split(sidewalk, MultiPoint(splitter_points))
             for part in new_sidewalk_parts.geoms:
@@ -1107,6 +1125,76 @@ def clean_geometries_gdf(
     return gpd.GeoDataFrame(geometry=cleaned_geometries, crs=gdf.crs)
 
 
+def merge_short_segments_gdf(
+    sidewalks_gdf: gpd.GeoDataFrame, min_stretch_size: float
+) -> gpd.GeoDataFrame:
+    """Merges sidewalk segments shorter than a specified length with their neighbors.
+
+    This function performs topological cleaning by finding sidewalk segments that
+    are shorter than `min_stretch_size` and merging them with their shortest
+    neighboring segment.
+
+    Args:
+        sidewalks_gdf: A GeoDataFrame of sidewalk lines.
+        min_stretch_size: The minimum length for a sidewalk segment.
+
+    Returns:
+        A new GeoDataFrame with short segments merged.
+    """
+    if min_stretch_size is None or min_stretch_size <= 0:
+        return sidewalks_gdf
+
+    geometries = list(sidewalks_gdf.geometry)
+
+    while True:
+        merged_in_iteration = False
+
+        # Find the first short segment
+        short_segment_idx = -1
+        for i, geom in enumerate(geometries):
+            if geom.length < min_stretch_size:
+                short_segment_idx = i
+                break
+
+        if short_segment_idx == -1:
+            # No more short segments
+            break
+
+        short_segment = geometries[short_segment_idx]
+
+        # Find neighbors
+        neighbors = []
+        for i, geom in enumerate(geometries):
+            if i != short_segment_idx and geom.touches(short_segment):
+                neighbors.append((i, geom))
+
+        if neighbors:
+            # Find the shortest neighbor
+            shortest_neighbor_idx, shortest_neighbor = min(
+                neighbors, key=lambda x: x[1].length
+            )
+
+            # Merge the short segment with its shortest neighbor
+            from shapely.ops import linemerge
+
+            merged_line = linemerge([short_segment, shortest_neighbor])
+
+            # Remove the old segments and add the new one
+            # Important: remove the one with the larger index first
+            idx1, idx2 = sorted([short_segment_idx, shortest_neighbor_idx], reverse=True)
+            geometries.pop(idx1)
+            geometries.pop(idx2)
+            geometries.append(merged_line)
+
+            merged_in_iteration = True
+
+        if not merged_in_iteration:
+            # Avoid infinite loops if a short segment has no neighbors
+            break
+
+    return gpd.GeoDataFrame(geometry=geometries, crs=sidewalks_gdf.crs)
+
+
 def split_sidewalks_gdf(
     sidewalks_gdf: gpd.GeoDataFrame,
     intersection_points_gdf: gpd.GeoDataFrame,
@@ -1114,6 +1202,7 @@ def split_sidewalks_gdf(
     pois_gdf: gpd.GeoDataFrame,
     max_length: float = None,
     num_segments: int = None,
+    min_stretch_size: float = None,
 ) -> gpd.GeoDataFrame:
     """Splits sidewalks based on multiple criteria.
 
@@ -1200,6 +1289,9 @@ def split_sidewalks_gdf(
     # Clean the final geometries
     gdf = clean_geometries_gdf(gdf)
 
+    # Merge short segments
+    gdf = merge_short_segments_gdf(gdf, min_stretch_size)
+
     return gdf
 
 
@@ -1266,6 +1358,7 @@ def draw_sidewalks_gdf(
     streets_gdf: gpd.GeoDataFrame,
     buffer_dist: float,
     curve_radius: float,
+    min_d_to_building: float,
 ) -> gpd.GeoDataFrame:
     """Generates sidewalks using the proper algorithm from the QGIS plugin.
 
@@ -1284,14 +1377,17 @@ def draw_sidewalks_gdf(
         streets_gdf: A GeoDataFrame of streets, used for exclusion zones.
         buffer_dist: The default buffer distance.
         curve_radius: Radius for smooth corner creation.
+        min_d_to_building: The minimum required distance from a building.
 
     Returns:
         A new GeoDataFrame containing the generated sidewalk lines.
     """
-    from .parameters import big_buffer_d, min_d_to_building
-    
+    from .parameters import big_buffer_d
+
     # Step 1: Adjust buffer distance for buildings
-    gdf_with_buffers = adjust_buffer_for_buildings(gdf, buildings_gdf, buffer_dist)
+    gdf_with_buffers = adjust_buffer_for_buildings(
+        gdf, buildings_gdf, buffer_dist, min_d_to_building
+    )
     
     # Step 2: Calculate dynamic buffer distances
     # Buffer distance = (road_width / 2) + (extra_distance / 2)
@@ -1350,6 +1446,9 @@ def draw_sidewalks_gdf(
     # Step 9: Calculate properties
     sidewalks_gdf = calculate_sidewalk_properties(sidewalks_gdf)
     
+    # Explode multilinestrings to linestrings
+    sidewalks_gdf = sidewalks_gdf.explode(index_parts=False)
+
     return sidewalks_gdf
 
 

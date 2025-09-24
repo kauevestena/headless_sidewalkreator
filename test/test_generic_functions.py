@@ -96,7 +96,9 @@ def test_filter_and_buffer_protoblocks_gdf_no_sidewalks():
     protoblocks_gdf = gpd.GeoDataFrame(geometry=[poly], crs="EPSG:3857")
     sidewalks_gdf = gpd.GeoDataFrame(geometry=[], crs="EPSG:3857")
 
-    buffered_gdf = filter_and_buffer_protoblocks_gdf(protoblocks_gdf, sidewalks_gdf)
+    buffered_gdf = filter_and_buffer_protoblocks_gdf(
+        protoblocks_gdf, sidewalks_gdf, cutoff_percent=50
+    )
     assert not buffered_gdf.empty
 
 def test_data_clean_gdf_with_other_tags():
@@ -223,7 +225,9 @@ def test_draw_sidewalks_gdf(mock_adjust_buffer):
     adjusted_gdf['buffer_dist'] = 2
     mock_adjust_buffer.return_value = adjusted_gdf
 
-    sidewalks_gdf = draw_sidewalks_gdf(gdf, buildings_gdf, gdf, buffer_dist=2, curve_radius=3.0)
+    sidewalks_gdf = draw_sidewalks_gdf(
+        gdf, buildings_gdf, gdf, buffer_dist=2, curve_radius=3.0, min_d_to_building=1.0
+    )
     assert not sidewalks_gdf.empty
     mock_adjust_buffer.assert_called_once()
 
@@ -235,7 +239,9 @@ def test_adjust_buffer_for_buildings():
     buildings = [Polygon([(0, 2), (2, 2), (2, 4), (0, 4)])]
     buildings_gdf = gpd.GeoDataFrame(geometry=buildings, crs="EPSG:3857")
 
-    adjusted_gdf = adjust_buffer_for_buildings(lines_gdf, buildings_gdf, 5)
+    adjusted_gdf = adjust_buffer_for_buildings(
+        lines_gdf, buildings_gdf, 5, min_d_to_building=1.0
+    )
     assert "buffer_dist" in adjusted_gdf.columns
     assert adjusted_gdf["buffer_dist"].iloc[0] < 5
 
@@ -246,7 +252,9 @@ def test_adjust_buffer_for_buildings_no_buildings():
     lines_gdf = gpd.GeoDataFrame(geometry=lines, crs="EPSG:3857")
     buildings_gdf = gpd.GeoDataFrame(geometry=[], crs="EPSG:3857")
 
-    adjusted_gdf = adjust_buffer_for_buildings(lines_gdf, buildings_gdf, 5)
+    adjusted_gdf = adjust_buffer_for_buildings(
+        lines_gdf, buildings_gdf, 5, min_d_to_building=1.0
+    )
     assert "buffer_dist" in adjusted_gdf.columns
     assert adjusted_gdf["buffer_dist"].iloc[0] == 5
 
@@ -314,3 +322,22 @@ def test_generate_kerbs_gdf():
     kerbs_gdf = generate_kerbs_gdf(crossings_gdf)
     assert len(kerbs_gdf) == 4
     assert all(kerbs_gdf.geometry.type == "Point")
+
+
+from headless_sidewalkreator.generic_functions import merge_short_segments_gdf
+
+def test_merge_short_segments_gdf():
+    """Test merge_short_segments_gdf."""
+    lines = [
+        LineString([(0, 0), (1, 0)]),  # length 1
+        LineString([(1, 0), (10, 0)]), # length 9
+        LineString([(10, 0), (11, 0)]),# length 1
+    ]
+    sidewalks_gdf = gpd.GeoDataFrame(geometry=lines, crs="EPSG:3857")
+
+    merged_gdf = merge_short_segments_gdf(sidewalks_gdf, min_stretch_size=2)
+
+    # The two short segments should be merged with the long one
+    assert len(merged_gdf) < 3
+    # The total length should be preserved
+    assert sidewalks_gdf.geometry.length.sum() == merged_gdf.geometry.length.sum()

@@ -23,7 +23,7 @@ from .generic_functions import (
     split_sidewalks_gdf,
     generate_kerbs_gdf,
 )
-from .parameters import default_widths, fallback_default_width, default_curve_radius
+from . import parameters as params
 
 
 def generate_sidewalks_gdf(
@@ -32,6 +32,7 @@ def generate_sidewalks_gdf(
     parameters: dict = None,
     ignore_existing: bool = False,
 ) -> dict:
+    print("--- generate_sidewalks_gdf called ---")
     """Generate sidewalks from input polygon and OSM data, returning GeoDataFrames.
     
     This is the main API function that accepts and returns GeoDataFrames instead of files,
@@ -59,12 +60,21 @@ def generate_sidewalks_gdf(
     # Consolidate parameters
     run_params = {
         "timeout": 60,
-        "default_widths": default_widths,
-        "fallback_default_width": fallback_default_width,
-        "default_curve_radius": default_curve_radius,
+        "default_widths": params.default_widths,
+        "fallback_default_width": params.fallback_default_width,
+        "default_curve_radius": params.default_curve_radius,
         "buffer_dist": 2,
         "split_max_len": None,
         "split_num_segments": None,
+        "min_d_to_building": params.min_d_to_building,
+        "perc_draw_kerbs": params.perc_draw_kerbs,
+        "perc_tol_crossings": params.perc_tol_crossings,
+        "increment_inward": params.increment_inward,
+        "max_crossings_iterations": params.max_crossings_iterations,
+        "cutoff_percent_protoblock": params.cutoff_percent_protoblock,
+        "min_stretch_size": params.min_stretch_size,
+        "abs_max_crossing_len": params.abs_max_crossing_len,
+        "dead_end_removal_iterations": 1,  # Default to 1 iteration
     }
     
     if parameters:
@@ -79,37 +89,33 @@ def generate_sidewalks_gdf(
     # 3. Fetch OSM Data (allow injection via `osm_gdf`)
     if osm_gdf is None:
         osm_gdf = fetch_street_network_for_bbox(bbox, timeout=run_params["timeout"])
-
-    print(f"Number of features in osm_gdf: {len(osm_gdf)}")
-    print(f"Columns in osm_gdf: {osm_gdf.columns}")
-    print(f"CRS of osm_gdf: {osm_gdf.crs}")
-    print(f"Bbox of osm_gdf: {osm_gdf.total_bounds}")
-    print(f"CRS of input_gdf: {input_gdf.crs}")
-    print(f"Bbox of input_gdf: {input_gdf.total_bounds}")
+    print("Step 3 complete.")
 
     # 4. Clip data
     clipped_gdf = clip_gdf(osm_gdf, input_gdf)
+    print("Step 4 complete.")
 
     # 5. Reproject to a local TM
     utm_crs = input_gdf.estimate_utm_crs()
     clipped_reproj_gdf = reproject_gdf(clipped_gdf, utm_crs)
+    print("Step 5 complete.")
 
-    print(f"Number of features in clipped_reproj_gdf: {len(clipped_reproj_gdf)}")
     # 6. Clean data
     cleaned_gdf, existing_sidewalks, existing_crossings = data_clean_gdf(
         clipped_reproj_gdf,
         run_params["default_widths"],
         run_params["fallback_default_width"],
     )
+    print("Step 6 complete.")
 
     # 7. Split lines at intersections
     lines_gdf = cleaned_gdf[cleaned_gdf.geometry.type == "LineString"].copy()
-    print(f"Number of lines before intersection splitting: {len(lines_gdf)}")
     splitted_gdf = split_lines_at_intersections(lines_gdf)
-    print(f"Number of lines after intersection splitting: {len(splitted_gdf)}")
+    print("Step 7 complete.")
 
     # 8. Create protoblocks from polygonizing
     protoblocks_gdf = polygonize_lines_gdf(splitted_gdf)
+    print("Step 8 complete.")
 
     # 9. Extract POI data (buildings, addresses, other POIs)
     buildings_gdf = cleaned_gdf[
@@ -156,6 +162,7 @@ def generate_sidewalks_gdf(
         streets_gdf,
         buffer_dist=run_params["buffer_dist"],
         curve_radius=run_params["default_curve_radius"],
+        min_d_to_building=run_params["min_d_to_building"],
     )
 
     # Handle sidewalk tags
@@ -163,15 +170,28 @@ def generate_sidewalks_gdf(
 
     # 11. Remove lines from no-block zones if ignore_existing is False
     if not ignore_existing:
-        sidewalks_gdf = remove_lines_from_no_block_gdf(sidewalks_gdf)
+        sidewalks_gdf = remove_lines_from_no_block_gdf(
+            sidewalks_gdf, iterations=run_params["dead_end_removal_iterations"]
+        )
 
     # 12. Filter and buffer protoblocks
     protoblocks_gdf = filter_and_buffer_protoblocks_gdf(
-        protoblocks_gdf, sidewalks_gdf, ignore_existing=ignore_existing
+        protoblocks_gdf,
+        sidewalks_gdf,
+        cutoff_percent=run_params["cutoff_percent_protoblock"],
+        ignore_existing=ignore_existing,
     )
 
     # 13. Draw crossings using ABCDE algorithm
-    crossings_gdf = draw_crossings_gdf(splitted_gdf, sidewalks_gdf)
+    crossings_gdf = draw_crossings_gdf(
+        splitted_gdf,
+        sidewalks_gdf,
+        increment_inward=run_params["increment_inward"],
+        max_crossings_iterations=run_params["max_crossings_iterations"],
+        abs_max_crossing_len=run_params["abs_max_crossing_len"],
+        perc_tol_crossings=run_params["perc_tol_crossings"],
+        perc_draw_kerbs=run_params["perc_draw_kerbs"],
+    )
 
     # 14. Split sidewalks (now with POI integration)
     intersection_points_gdf = gpd.GeoDataFrame(
@@ -184,6 +204,7 @@ def generate_sidewalks_gdf(
         unified_pois_gdf,  # Now using the actual POI layer
         max_length=run_params["split_max_len"],
         num_segments=run_params["split_num_segments"],
+        min_stretch_size=run_params["min_stretch_size"],
     )
 
     # 15. Generate kerbs
