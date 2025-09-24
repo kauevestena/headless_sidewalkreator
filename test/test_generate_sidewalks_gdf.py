@@ -48,19 +48,20 @@ def test_generate_sidewalks_gdf_basic(osm_sample_gdf):
 @pytest.mark.skip(reason="This test requires live OSM data and can be slow. Enable manually for integration testing.")
 def test_generate_sidewalks_gdf_with_parameters():
     """Test generate_sidewalks_gdf with custom parameters and real data."""
-    # Use a smaller area that won't trigger OSMnx subdivision
-    # This is a small area in downtown area to test real OSM fetching
-    min_lat = -25.4270
-    min_lon = -49.2550
-    max_lat = -25.4260
-    max_lon = -49.2540
+    # Use the bbox provided by the user to avoid coordinate confusion
+    bbox = {
+        "min_lon": -49.289753,
+        "min_lat": -25.466447,
+        "max_lon": -49.284410,
+        "max_lat": -25.462165
+    }
 
     polygon = Polygon([
-        (min_lon, min_lat),
-        (min_lon, max_lat),
-        (max_lon, max_lat),
-        (max_lon, min_lat),
-        (min_lon, min_lat)
+        (bbox["min_lon"], bbox["min_lat"]),
+        (bbox["min_lon"], bbox["max_lat"]),
+        (bbox["max_lon"], bbox["max_lat"]),
+        (bbox["max_lon"], bbox["min_lat"]),
+        (bbox["min_lon"], bbox["min_lat"])
     ])
     input_polygon_gdf = gpd.GeoDataFrame(geometry=[polygon], crs="EPSG:4326")
     
