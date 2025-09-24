@@ -150,6 +150,7 @@ def generate_sidewalks_gdf(
         unified_pois_gdf = gpd.pd.concat(poi_layers, ignore_index=True)
     else:
         unified_pois_gdf = gpd.GeoDataFrame(geometry=[], crs=clipped_reproj_gdf.crs)
+    print("Step 9 complete.")
 
     # 10. Draw sidewalks
     streets_gdf = cleaned_gdf[
@@ -164,6 +165,7 @@ def generate_sidewalks_gdf(
         curve_radius=run_params["default_curve_radius"],
         min_d_to_building=run_params["min_d_to_building"],
     )
+    print("Step 10 complete.")
 
     # Handle sidewalk tags
     sidewalks_gdf = handle_sidewalk_tags(sidewalks_gdf, cleaned_gdf)
@@ -173,6 +175,7 @@ def generate_sidewalks_gdf(
         sidewalks_gdf = remove_lines_from_no_block_gdf(
             sidewalks_gdf, iterations=run_params["dead_end_removal_iterations"]
         )
+    print("Step 11 complete.")
 
     # 12. Filter and buffer protoblocks
     protoblocks_gdf = filter_and_buffer_protoblocks_gdf(
@@ -181,6 +184,7 @@ def generate_sidewalks_gdf(
         cutoff_percent=run_params["cutoff_percent_protoblock"],
         ignore_existing=ignore_existing,
     )
+    print("Step 12 complete.")
 
     # 13. Draw crossings using ABCDE algorithm
     crossings_gdf = draw_crossings_gdf(
@@ -192,6 +196,7 @@ def generate_sidewalks_gdf(
         perc_tol_crossings=run_params["perc_tol_crossings"],
         perc_draw_kerbs=run_params["perc_draw_kerbs"],
     )
+    print("Step 13 complete.")
 
     # 14. Split sidewalks (now with POI integration)
     intersection_points_gdf = gpd.GeoDataFrame(
@@ -206,9 +211,11 @@ def generate_sidewalks_gdf(
         num_segments=run_params["split_num_segments"],
         min_stretch_size=run_params["min_stretch_size"],
     )
+    print("Step 14 complete.")
 
     # 15. Generate kerbs
     kerbs_gdf = generate_kerbs_gdf(crossings_gdf)
+    print("Step 15 complete.")
 
     # Return all results as GeoDataFrames
     result = {

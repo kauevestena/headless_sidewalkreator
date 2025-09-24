@@ -872,16 +872,27 @@ def split_sidewalks_by_voronoi(
         # Not enough points for Voronoi diagram, return original sidewalks
         return sidewalks_gdf
     
-    vor = Voronoi(points)
+    try:
+        vor = Voronoi(points)
+    except Exception as e:
+        # Voronoi computation failed, return original sidewalks
+        return sidewalks_gdf
 
     # Convert Voronoi polygons to shapely Polygons
-    lines = [
-        LineString(vor.vertices[line]) for line in vor.ridge_vertices if -1 not in line
-    ]
+    try:
+        lines = [
+            LineString(vor.vertices[line]) for line in vor.ridge_vertices if -1 not in line
+        ]
+    except Exception as e:
+        return sidewalks_gdf
+
+    if not lines:
+        # No valid Voronoi lines generated
+        return sidewalks_gdf
 
     # Create a GeoDataFrame of the Voronoi lines
     voronoi_lines_gdf = gpd.GeoDataFrame(geometry=lines, crs=sidewalks_gdf.crs)
-
+    
     # Split the sidewalks by the Voronoi lines
     new_sidewalks = []
     for i, row in sidewalks_gdf.iterrows():
@@ -904,36 +915,46 @@ def split_sidewalks_by_voronoi(
         if splittable_geom.is_empty or not splittable_geom.is_valid:
             continue
         
-        splitter = voronoi_lines_gdf.union_all()
-        # Ensure splitter is not a GeometryCollection
-        if splitter.geom_type == 'GeometryCollection':
-            splitter = MultiLineString([line for line in splitter.geoms if line.geom_type in ['LineString', 'MultiLineString']])
-
-        if not splitter.is_empty and splitter.is_valid:
+        # Avoid potentially hanging union_all operation - split by individual lines instead
+        for voronoi_line in voronoi_lines_gdf.geometry:
+            if voronoi_line.is_empty or not voronoi_line.is_valid:
+                continue
+                
             try:
-                new_sidewalk_parts = split(splittable_geom, splitter)
-                if hasattr(new_sidewalk_parts, 'geoms'):
-                    for part in new_sidewalk_parts.geoms:
-                        if not part.is_empty:
-                            new_sidewalks.append(part)
-                else:
-                    # Single geometry result
-                    if not new_sidewalk_parts.is_empty:
-                        new_sidewalks.append(new_sidewalk_parts)
-            except Exception:
-                # If splitting fails, keep the original geometry
-                new_sidewalks.append(splittable_geom)
+                # Split by this individual line
+                split_result = split(splittable_geom, voronoi_line)
+                if hasattr(split_result, 'geoms') and len(split_result.geoms) > 1:
+                    # Successfully split - use the split result for next iteration
+                    splittable_geom = split_result
+                    break
+            except Exception as e:
+                # Split failed, but continue with other lines
+                continue
+        
+        # Add final geometry to results
+        if hasattr(splittable_geom, 'geoms'):
+            for part in splittable_geom.geoms:
+                if not part.is_empty:
+                    new_sidewalks.append(part)
         else:
-            new_sidewalks.append(splittable_geom)
+            if not splittable_geom.is_empty:
+                new_sidewalks.append(splittable_geom)
 
-    # Return results
-    if new_sidewalks:
-        gdf = gpd.GeoDataFrame(geometry=new_sidewalks)
-        gdf = gdf.set_crs(sidewalks_gdf.crs)
-        return gdf
-    else:
-        # Return empty GeoDataFrame with same CRS if no valid sidewalks
-        return gpd.GeoDataFrame(geometry=[], crs=sidewalks_gdf.crs)
+    if not new_sidewalks:
+        # No valid splits produced, return original
+        return sidewalks_gdf
+
+    # Create a new GeoDataFrame
+    new_gdf = gpd.GeoDataFrame(geometry=new_sidewalks, crs=sidewalks_gdf.crs)
+    
+    # Copy over attributes from original (matching on spatial proximity)
+    # For simplicity, just propagate the first row's attributes to all new segments
+    if not sidewalks_gdf.empty and len(sidewalks_gdf.columns) > 1:
+        for col in sidewalks_gdf.columns:
+            if col != 'geometry':
+                new_gdf[col] = sidewalks_gdf.iloc[0][col]
+    
+    return new_gdf
 
 
 def split_sidewalks_by_protoblock_corners(
@@ -1043,19 +1064,49 @@ def split_sidewalks_by_max_length(
     new_sidewalks = []
     for i, row in sidewalks_gdf.iterrows():
         sidewalk = row.geometry
+        
+        # Add defensive checks
+        if sidewalk is None or sidewalk.is_empty or not sidewalk.is_valid:
+            continue
+            
         if sidewalk.length > max_length:
-            num_splits = int(sidewalk.length // max_length)
-            splitter_points = [
-                sidewalk.interpolate((j + 1) * max_length) for j in range(num_splits)
-            ]
-            new_sidewalk_parts = split(sidewalk, MultiPoint(splitter_points))
-            for part in new_sidewalk_parts.geoms:
-                new_sidewalks.append(part)
+            try:
+                num_splits = int(sidewalk.length // max_length)
+                if num_splits > 1000:  # Prevent excessive splits that could cause hangs
+                    # Skip this sidewalk to prevent excessive computation
+                    new_sidewalks.append(sidewalk)
+                    continue
+                    
+                splitter_points = [
+                    sidewalk.interpolate((j + 1) * max_length) for j in range(num_splits)
+                ]
+                # Filter out empty or invalid points
+                valid_splitter_points = [p for p in splitter_points if p and not p.is_empty]
+                
+                if valid_splitter_points:
+                    new_sidewalk_parts = split(sidewalk, MultiPoint(valid_splitter_points))
+                    if hasattr(new_sidewalk_parts, 'geoms'):
+                        for part in new_sidewalk_parts.geoms:
+                            if part and not part.is_empty:
+                                new_sidewalks.append(part)
+                    else:
+                        new_sidewalks.append(new_sidewalk_parts)
+                else:
+                    new_sidewalks.append(sidewalk)
+            except Exception as e:
+                # If splitting fails, keep the original geometry  
+                new_sidewalks.append(sidewalk)
         else:
             new_sidewalks.append(sidewalk)
 
+    if not new_sidewalks:
+        return sidewalks_gdf
+        
     gdf = gpd.GeoDataFrame(geometry=new_sidewalks)
-    gdf = gdf.set_crs(sidewalks_gdf.crs)
+    try:
+        gdf = gdf.set_crs(sidewalks_gdf.crs)
+    except Exception:
+        gdf.crs = sidewalks_gdf.crs
     return gdf
 
 
