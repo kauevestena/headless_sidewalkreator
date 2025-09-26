@@ -698,10 +698,10 @@ def draw_crossings_gdf(
                     intersection_points[point_key] = {"point": pt, "roads": []}
                 intersection_points[point_key]["roads"].extend([idx1, idx2])
     
-    # Filter to only intersections with 3+ roads (valid crossing candidates)
+    # Filter to intersections with 2+ roads (allowing for grid patterns where intersections have exactly 2 roads)
     valid_intersections = {
         k: v for k, v in intersection_points.items() 
-        if len(set(v["roads"])) >= 3
+        if len(set(v["roads"])) >= 2
     }
     
     crossing_lines = []
@@ -711,46 +711,46 @@ def draw_crossings_gdf(
         intersection_point = point_data["point"]
         road_indices = list(set(point_data["roads"]))
         
-        # For each pair of roads at this intersection, try to create a crossing
-        for i in range(len(road_indices)):
-            for j in range(i + 1, len(road_indices)):
-                road1_idx = road_indices[i]
-                road2_idx = road_indices[j]
-                
-                road1 = streets_gdf.geometry.iloc[road1_idx]
-                road2 = streets_gdf.geometry.iloc[road2_idx]
-                
-                # Try to generate crossing using ABCDE algorithm
-                try:
-                    crossing = generate_crossing_abcde(
-                        intersection_point,
-                        road1,
-                        road2,
-                        streets_gdf.iloc[road1_idx],
-                        sidewalks_gdf,
-                        increment_inward,
-                        max_crossings_iterations,
-                        abs_max_crossing_len,
-                        perc_tol_crossings,
-                        perc_draw_kerbs,
-                    )
+        # Generate one crossing per intersection using the first pair of roads
+        if len(road_indices) >= 2:
+            road1_idx = road_indices[0]
+            road2_idx = road_indices[1]
+            
+            road1 = streets_gdf.geometry.iloc[road1_idx]
+            road2 = streets_gdf.geometry.iloc[road2_idx]
+            
+            # Try to generate crossing using ABCDE algorithm
+            try:
+                crossing = generate_crossing_abcde(
+                    intersection_point,
+                    road1,
+                    road2,
+                    streets_gdf.iloc[road1_idx],
+                    sidewalks_gdf,
+                    increment_inward,
+                    max_crossings_iterations,
+                    abs_max_crossing_len,
+                    perc_tol_crossings,
+                    perc_draw_kerbs,
+                )
 
-                    if crossing is not None:
-                        crossing_lines.append(crossing)
-                except Exception:
-                    # ABCDE failed, continue to simple fallback
-                    continue
+                if crossing is not None:
+                    crossing_lines.append(crossing)
+            except Exception:
+                # ABCDE failed, will use fallback
+                pass
     
-    # If ABCDE didn't generate any crossings, fall back to simple crossing generation
+    # If ABCDE didn't generate any crossings, fall back to simple crossing generation  
     if not crossing_lines:
-        # Simple fallback: create crossings at all intersection points
+        # Simple fallback: create crossings at intersection points
+        # Apply ABCDE algorithm more permissively if the primary attempt failed
+        
         for point_data in intersection_points.values():
             intersection_point = point_data["point"]
             road_indices = list(set(point_data["roads"]))
             
             if len(road_indices) >= 2:
-                # Create a simple crossing line
-                road1 = streets_gdf.geometry.iloc[road_indices[0]]
+                # Try a simplified crossing generation
                 direction = calculate_crossing_direction(intersection_point, 
                                                       streets_gdf.iloc[road_indices])
                 if direction:
@@ -792,6 +792,10 @@ def generate_crossing_abcde(intersection_point, road1, road2, road1_row, sidewal
     
     # Calculate expected street width for validation
     expected_width = road1_row.get("width", 6.0)
+    
+    # If no sidewalks are provided, be more lenient with crossing length validation
+    if sidewalks_gdf is None or len(sidewalks_gdf) == 0:
+        expected_width = max(expected_width, 15.0)  # Allow longer crossings without sidewalks
     
     # Calculate crossing direction (perpendicular to road1)
     road1_coords = list(road1.coords)
