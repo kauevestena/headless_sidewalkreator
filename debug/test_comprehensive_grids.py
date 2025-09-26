@@ -3,6 +3,10 @@ Comprehensive testing of crossing generation across many grid sizes.
 This test validates the mathematical formula C = 4wh - 2w - 2h for various grid combinations.
 """
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
 import random
 import geopandas as gpd
 from shapely.geometry import Polygon

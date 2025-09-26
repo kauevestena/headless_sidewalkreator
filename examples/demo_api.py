@@ -3,6 +3,10 @@
 This script shows how the new API allows users to handle I/O themselves.
 """
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
 import geopandas as gpd
 from shapely.geometry import Polygon, LineString
 from headless_sidewalkreator import sidewalkreator
