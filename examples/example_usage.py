@@ -1,5 +1,9 @@
 """Example usage of the new GeoDataFrame-based API."""
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
 import geopandas as gpd
 from shapely.geometry import Polygon
 from headless_sidewalkreator import sidewalkreator

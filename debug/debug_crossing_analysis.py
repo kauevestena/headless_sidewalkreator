@@ -7,7 +7,7 @@ for a 2×2 grid instead of the expected 8.
 
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'headless_sidewalkreator'))
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from headless_sidewalkreator.generic_functions import grid_lines, draw_crossings_gdf
 from headless_sidewalkreator import sidewalkreator

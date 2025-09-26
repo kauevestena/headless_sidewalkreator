@@ -3,6 +3,10 @@ Comprehensive test report for crossing generation across many grid combinations.
 This addresses the user's request to test with 10 runs with random w and h from 1 to 10.
 """
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
 import random
 from headless_sidewalkreator.generic_functions import grid_lines, draw_crossings_gdf
 import geopandas as gpd

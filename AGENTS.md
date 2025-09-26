@@ -47,3 +47,10 @@ Before submitting your changes, **you must ensure all tests pass**.
 - **Make sure your changes don't break existing tests.**
 - **Refer to the `README.md` and `data_assets/qgis_algorithm_description.md`** to understand the project's context and mechanics.
 - **Keep your changes focused.** If you are working on multiple features, create separate branches and pull requests for each.
+- **Organize generated files properly.** Any generated files, scripts, or utilities you create should be placed in appropriate thematic folders:
+  - **`examples/`** - Example scripts, demos, and usage samples
+  - **`debug/`** - Debugging utilities, analysis scripts, and testing tools
+  - **`tools/`** - General utility tools and helper scripts
+  - **`docs/`** - Documentation files, diagrams, and explanatory materials
+  - **`data_assets/`** - Test data, icons, and other project assets
+  - **DO NOT** leave generated files loose in the root folder. Always organize them into the appropriate thematic folder.

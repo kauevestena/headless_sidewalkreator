@@ -3,6 +3,10 @@
 Simple debugging script for crossing generation analysis.
 """
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
 from headless_sidewalkreator.generic_functions import grid_lines, draw_crossings_gdf
 from headless_sidewalkreator import sidewalkreator
 import geopandas as gpd
