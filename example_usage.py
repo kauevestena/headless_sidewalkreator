@@ -2,7 +2,7 @@
 
 import geopandas as gpd
 from shapely.geometry import Polygon
-from headless_sidewalkreator import generate_sidewalks_gdf
+from headless_sidewalkreator import sidewalkreator
 
 # Example: User handles their own I/O
 def example_usage():
@@ -24,7 +24,7 @@ def example_usage():
     }
     
     # 4. Call the new API function
-    result = generate_sidewalks_gdf(
+    result = sidewalkreator(
         input_polygon_gdf=input_polygon_gdf,
         osm_gdf=osm_gdf,
         parameters=custom_params,

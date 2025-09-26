@@ -5,7 +5,7 @@ This script shows how the new API allows users to handle I/O themselves.
 
 import geopandas as gpd
 from shapely.geometry import Polygon, LineString
-from headless_sidewalkreator import generate_sidewalks_gdf
+from headless_sidewalkreator import sidewalkreator
 
 def demo_new_api():
     """Demonstrate the new GeoDataFrame-based API with a simple example."""
@@ -47,9 +47,9 @@ def demo_new_api():
     print(f"   Custom buffer distance: {custom_params['buffer_dist']}m")
     
     # 3. Call the new API
-    print("\n3. Calling generate_sidewalks_gdf()...")
+    print("\n3. Calling sidewalkreator()...")
     try:
-        result = generate_sidewalks_gdf(
+        result = sidewalkreator(
             input_polygon_gdf=input_polygon_gdf,
             osm_gdf=osm_gdf,
             parameters=custom_params,

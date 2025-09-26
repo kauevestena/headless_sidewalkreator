@@ -1,4 +1,4 @@
-# headless_sidewalkreator
+# sidewalkreator
 
 A lightweight prototype for generating sidewalks from OSM data.
 
@@ -13,26 +13,26 @@ The library now provides two ways to use the sidewalk generation algorithm:
 
 ### 1. GeoDataFrame-based API (Recommended)
 
-The new `generate_sidewalks_gdf()` function accepts and returns GeoDataFrames, giving users full control over I/O.
+The new `sidewalkreator()` function accepts and returns GeoDataFrames, giving users full control over I/O.
 
 **Input options (choose one):**
 
 ```python
-from headless_sidewalkreator import generate_sidewalks_gdf
+from headless_sidewalkreator import sidewalkreator
 import geopandas as gpd
 
 # Option 1: Use a polygon GeoDataFrame
 input_polygon_gdf = gpd.read_file("area_of_interest.geojson")
-result = generate_sidewalks_gdf(input_polygon_gdf=input_polygon_gdf)
+result = sidewalkreator(input_polygon_gdf=input_polygon_gdf)
 
 # Option 2: Use a place name (geocoded automatically)
-result = generate_sidewalks_gdf(place_name="Amherst, MA")
+result = sidewalkreator(place_name="Amherst, MA")
 
 # Option 3: Use a bounding box (minx, miny, maxx, maxy)
-result = generate_sidewalks_gdf(bbox=(-72.53, 42.37, -72.52, 42.38))
+result = sidewalkreator(bbox=(-72.53, 42.37, -72.52, 42.38))
 
 # All options support additional parameters
-result = generate_sidewalks_gdf(
+result = sidewalkreator(
     bbox=(-72.53, 42.37, -72.52, 42.38),
     parameters={"buffer_dist": 2.0},  # Optional custom parameters
     ignore_existing=False
@@ -56,17 +56,19 @@ The tool can also be used from the command line with three input options:
 
 ```bash
 # Option 1: Use a GeoJSON polygon file
-python -m headless_sidewalkreator --input-file area.geojson --output-dir ./output
+sidewalkreator --input-file area.geojson --output-dir ./output
 
 # Option 2: Use a place name (geocoded automatically)  
-python -m headless_sidewalkreator --place-name "Amherst, MA" --output-dir ./output
+sidewalkreator --place-name "Amherst, MA" --output-dir ./output
 
 # Option 3: Use a bounding box (minx miny maxx maxy)
-python -m headless_sidewalkreator --bbox -72.53 42.37 -72.52 42.38 --output-dir ./output
+sidewalkreator --bbox -72.53 42.37 -72.52 42.38 --output-dir ./output
 
 # All options support additional parameters
-python -m headless_sidewalkreator --bbox -72.53 42.37 -72.52 42.38 --output-dir ./output --ignore-existing
+sidewalkreator --bbox -72.53 42.37 -72.52 42.38 --output-dir ./output --ignore-existing
 ```
+
+**Alternative**: The tool can also be invoked using `python -m headless_sidewalkreator` with the same arguments.
 
 ### 2. File-based API (Legacy)
 
