@@ -28,7 +28,7 @@ from .generic_functions import (
 from . import parameters as params
 
 
-def generate_sidewalks_gdf(
+def sidewalkreator(
     input_polygon_gdf: gpd.GeoDataFrame = None,
     place_name: str = None,
     bbox: tuple = None,
@@ -36,7 +36,7 @@ def generate_sidewalks_gdf(
     parameters: dict = None,
     ignore_existing: bool = False,
 ) -> dict:
-    print("--- generate_sidewalks_gdf called ---")
+    print("--- sidewalkreator called ---")
     """Generate sidewalks from input polygon and OSM data, returning GeoDataFrames.
     
     This is the main API function that accepts and returns GeoDataFrames instead of files,
@@ -274,7 +274,7 @@ def full_sidewalkreator_algorithm(
     This function orchestrates the entire sidewalk generation process, from
     reading the input polygon to generating the final output files.
     
-    This is a file-based wrapper around generate_sidewalks_gdf() for backward compatibility.
+    This is a file-based wrapper around sidewalkreator() for backward compatibility.
 
     Args:
         input_polygon_path: Path to the GeoJSON file containing the input polygon.
@@ -308,7 +308,7 @@ def full_sidewalkreator_algorithm(
         input_gdf = read_input_polygon(input_polygon_path)
 
     # 2. Use the new GeoDataFrame-based API
-    result = generate_sidewalks_gdf(
+    result = sidewalkreator(
         input_polygon_gdf=input_gdf,
         place_name=place_name,
         bbox=bbox,

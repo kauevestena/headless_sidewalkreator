@@ -1,21 +1,21 @@
-"""Tests for the new GeoDataFrame-based API (generate_sidewalks_gdf)."""
+"""Tests for the new GeoDataFrame-based API (sidewalkreator)."""
 
 import geopandas as gpd
 import pytest
 from unittest.mock import patch
 from shapely.geometry import Polygon
-from headless_sidewalkreator import generate_sidewalks_gdf
+from headless_sidewalkreator import sidewalkreator
 from headless_sidewalkreator import parameters as params
 
 
-def test_generate_sidewalks_gdf_basic(osm_sample_gdf):
-    """Test basic functionality of generate_sidewalks_gdf."""
+def test_sidewalkreator_basic(osm_sample_gdf):
+    """Test basic functionality of sidewalkreator."""
     # Create a simple input polygon
     polygon = Polygon([(-1, -1), (-1, 2), (2, 2), (2, -1), (-1, -1)])
     input_polygon_gdf = gpd.GeoDataFrame(geometry=[polygon], crs="EPSG:4326")
     
     # Call the new API
-    result = generate_sidewalks_gdf(
+    result = sidewalkreator(
         input_polygon_gdf=input_polygon_gdf,
         osm_gdf=osm_sample_gdf,
         parameters=None,
@@ -47,8 +47,8 @@ def test_generate_sidewalks_gdf_basic(osm_sample_gdf):
 
 
 @pytest.mark.skip(reason="This test requires live OSM data and can be slow. Enable manually for integration testing.")
-def test_generate_sidewalks_gdf_with_parameters():
-    """Test generate_sidewalks_gdf with custom parameters and real data."""
+def test_sidewalkreator_with_parameters():
+    """Test sidewalkreator with custom parameters and real data."""
     # Use the bbox provided by the user to avoid coordinate confusion
     bbox = {
         "min_lon": -49.289753,
@@ -74,7 +74,7 @@ def test_generate_sidewalks_gdf_with_parameters():
         "dead_end_removal_iterations": 1,  # Reduce iterations to prevent infinite loops
     }
     
-    result = generate_sidewalks_gdf(
+    result = sidewalkreator(
         input_polygon_gdf=input_polygon_gdf,
         parameters=custom_params,
         ignore_existing=True
@@ -84,8 +84,8 @@ def test_generate_sidewalks_gdf_with_parameters():
     assert 'sidewalks' in result
 
 
-def test_generate_sidewalks_gdf_with_parameters_mock_osm():
-    """Test generate_sidewalks_gdf with custom parameters using mock OSM data."""
+def test_sidewalkreator_with_parameters_mock_osm():
+    """Test sidewalkreator with custom parameters using mock OSM data."""
     # This test uses the same parameters as the problematic test but with controlled data
     polygon = Polygon([(-1, -1), (-1, 2), (2, 2), (2, -1), (-1, -1)])
     input_polygon_gdf = gpd.GeoDataFrame(geometry=[polygon], crs="EPSG:4326")
@@ -118,7 +118,7 @@ def test_generate_sidewalks_gdf_with_parameters_mock_osm():
         "dead_end_removal_iterations": 2,
     }
     
-    result = generate_sidewalks_gdf(
+    result = sidewalkreator(
         input_polygon_gdf=input_polygon_gdf,
         osm_gdf=mock_osm_gdf,
         parameters=custom_params,
@@ -135,8 +135,8 @@ def test_generate_sidewalks_gdf_with_parameters_mock_osm():
     assert result['parameters']['dead_end_removal_iterations'] == 2
 
 
-def test_generate_sidewalks_gdf_empty_osm():
-    """Test generate_sidewalks_gdf with empty OSM data."""
+def test_sidewalkreator_empty_osm():
+    """Test sidewalkreator with empty OSM data."""
     polygon = Polygon([(-1, -1), (-1, 2), (2, 2), (2, -1), (-1, -1)])
     input_polygon_gdf = gpd.GeoDataFrame(geometry=[polygon], crs="EPSG:4326")
     
@@ -144,7 +144,7 @@ def test_generate_sidewalks_gdf_empty_osm():
     empty_osm_gdf = gpd.GeoDataFrame(columns=['geometry', 'highway', 'building', 'amenity', 'shop'])
     empty_osm_gdf = empty_osm_gdf.set_crs("EPSG:4326")
     
-    result = generate_sidewalks_gdf(
+    result = sidewalkreator(
         input_polygon_gdf=input_polygon_gdf,
         osm_gdf=empty_osm_gdf,
         parameters=None,
@@ -157,15 +157,15 @@ def test_generate_sidewalks_gdf_empty_osm():
     assert isinstance(result['sidewalks'], gpd.GeoDataFrame)
 
 
-def test_generate_sidewalks_gdf_validates_input_polygon():
-    """Test that generate_sidewalks_gdf validates input polygon."""
+def test_sidewalkreator_validates_input_polygon():
+    """Test that sidewalkreator validates input polygon."""
     # Create invalid input (None polygon)
     input_polygon_gdf = gpd.GeoDataFrame(geometry=[None], crs="EPSG:4326")
     empty_osm_gdf = gpd.GeoDataFrame(columns=['geometry', 'highway', 'building', 'amenity', 'shop'])
     empty_osm_gdf = empty_osm_gdf.set_crs("EPSG:4326")
     
     with pytest.raises(ValueError, match="NaN or None values are not allowed."):
-        generate_sidewalks_gdf(
+        sidewalkreator(
             input_polygon_gdf=input_polygon_gdf,
             osm_gdf=empty_osm_gdf,
             parameters=None,
@@ -173,7 +173,7 @@ def test_generate_sidewalks_gdf_validates_input_polygon():
         )
 
 
-def test_generate_sidewalks_gdf_return_structure():
+def test_sidewalkreator_return_structure():
     """Test that the return structure contains all expected components."""
     polygon = Polygon([(-1, -1), (-1, 2), (2, 2), (2, -1), (-1, -1)])
     input_polygon_gdf = gpd.GeoDataFrame(geometry=[polygon], crs="EPSG:4326")
@@ -188,7 +188,7 @@ def test_generate_sidewalks_gdf_return_structure():
     })
     minimal_osm_gdf = minimal_osm_gdf.set_crs("EPSG:4326")
     
-    result = generate_sidewalks_gdf(
+    result = sidewalkreator(
         input_polygon_gdf=input_polygon_gdf,
         osm_gdf=minimal_osm_gdf
     )
@@ -218,13 +218,13 @@ def test_generate_sidewalks_gdf_return_structure():
 
 
 @pytest.mark.skip(reason="This test requires a live API call to OSM and is slow. Enable for integration testing.")
-def test_generate_sidewalks_gdf_from_place_name():
+def test_sidewalkreator_from_place_name():
     """Test using a place_name to define the area of interest."""
 
     # Using a small, well-defined place to limit query size
     place_name = "Amherst, Massachusetts, USA"
 
-    result = generate_sidewalks_gdf(
+    result = sidewalkreator(
         place_name=place_name,
         ignore_existing=True  # Ignore existing sidewalks for a more predictable test
     )
@@ -243,8 +243,8 @@ def test_generate_sidewalks_gdf_from_place_name():
     # Check that the CRS is a projected CRS, indicating successful reprojection
     assert result['sidewalks'].crs.is_projected
 
-def test_generate_sidewalks_gdf_input_validation():
-    """Test input validation for generate_sidewalks_gdf."""
+def test_sidewalkreator_input_validation():
+    """Test input validation for sidewalkreator."""
 
     polygon = Polygon([(-1, -1), (-1, 2), (2, 2), (2, -1), (-1, -1)])
     input_polygon_gdf = gpd.GeoDataFrame(geometry=[polygon], crs="EPSG:4326")
@@ -253,25 +253,25 @@ def test_generate_sidewalks_gdf_input_validation():
 
     # Test providing multiple input sources
     with pytest.raises(ValueError, match="Provide exactly one of 'place_name', 'input_polygon_gdf', or 'bbox'."):
-        generate_sidewalks_gdf(
+        sidewalkreator(
             input_polygon_gdf=input_polygon_gdf,
             place_name=place_name
         )
 
     with pytest.raises(ValueError, match="Provide exactly one of 'place_name', 'input_polygon_gdf', or 'bbox'."):
-        generate_sidewalks_gdf(
+        sidewalkreator(
             input_polygon_gdf=input_polygon_gdf,
             bbox=bbox
         )
 
     with pytest.raises(ValueError, match="Provide exactly one of 'place_name', 'input_polygon_gdf', or 'bbox'."):
-        generate_sidewalks_gdf(
+        sidewalkreator(
             place_name=place_name,
             bbox=bbox
         )
 
     with pytest.raises(ValueError, match="Provide exactly one of 'place_name', 'input_polygon_gdf', or 'bbox'."):
-        generate_sidewalks_gdf(
+        sidewalkreator(
             input_polygon_gdf=input_polygon_gdf,
             place_name=place_name,
             bbox=bbox
@@ -279,12 +279,12 @@ def test_generate_sidewalks_gdf_input_validation():
 
     # Test providing no input source
     with pytest.raises(ValueError, match="Provide exactly one of 'place_name', 'input_polygon_gdf', or 'bbox'."):
-        generate_sidewalks_gdf()
+        sidewalkreator()
 
 
 @patch('headless_sidewalkreator.full_sidewalkreator_algorithm.fetch_street_network_for_bbox')
-def test_generate_sidewalks_gdf_with_bbox(mock_fetch, osm_sample_gdf):
-    """Test generate_sidewalks_gdf with bbox input."""
+def test_sidewalkreator_with_bbox(mock_fetch, osm_sample_gdf):
+    """Test sidewalkreator with bbox input."""
     # Mock the OSM data fetch
     mock_fetch.return_value = osm_sample_gdf
     
@@ -292,7 +292,7 @@ def test_generate_sidewalks_gdf_with_bbox(mock_fetch, osm_sample_gdf):
     bbox = (-1, -1, 2, 2)
     
     # Call the function with bbox
-    result = generate_sidewalks_gdf(
+    result = sidewalkreator(
         bbox=bbox,
         osm_gdf=osm_sample_gdf,
         parameters={"buffer_dist": 1.0}

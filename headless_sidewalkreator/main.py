@@ -11,15 +11,16 @@ def run_headless(*args, **kwargs):
     return full_sidewalkreator_algorithm(*args, **kwargs)
 
 
-if __name__ == "__main__":
+def main():
+    """Main CLI entry point."""
     import argparse
 
     parser = argparse.ArgumentParser(
         description="Generate sidewalks from OpenStreetMap data. \n\n"
         "Usage examples: \n"
-        "python -m headless_sidewalkreator --place-name 'Amherst, MA' --output-dir ./output \n"
-        "python -m headless_sidewalkreator --input-file path/to/area.geojson --output-dir ./output \n"
-        "python -m headless_sidewalkreator --bbox -71.5 42.3 -71.4 42.4 --output-dir ./output",
+        "sidewalkreator --place-name 'Amherst, MA' --output-dir ./output \n"
+        "sidewalkreator --input-file path/to/area.geojson --output-dir ./output \n"
+        "sidewalkreator --bbox -71.5 42.3 -71.4 42.4 --output-dir ./output",
         formatter_class=argparse.RawTextHelpFormatter,
     )
 
@@ -78,3 +79,7 @@ if __name__ == "__main__":
         parameters_path=args.parameters_path,
         ignore_existing=args.ignore_existing,
     )
+
+
+if __name__ == "__main__":
+    main()
