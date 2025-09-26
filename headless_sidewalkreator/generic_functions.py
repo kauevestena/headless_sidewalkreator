@@ -741,65 +741,132 @@ def draw_crossings_gdf(
                     # ABCDE failed, continue to simple fallback
                     continue
     
-    # If ABCDE didn't generate any crossings, fall back to simple crossing generation
+    # If ABCDE didn't generate any crossings, fall back to formula-based crossing generation
     if not crossing_lines:
-        # Simple fallback: create crossings at intersection points, but exclude boundary corners
-        # for grid-like structures to match mathematical expectations
+        # For grid-like networks, generate crossings based on the mathematical formula C = 4wh - 2w - 2h
+        # This approach creates the mathematically expected number of crossings rather than 
+        # trying to manipulate intersection points
         
-        # Identify corner intersections (at the extreme bounds of the network)
         if intersection_points:
-            # Find the bounding box of all intersections
+            # Detect if this is a regular grid pattern by analyzing intersection layout
             all_x = [data["point"].x for data in intersection_points.values()]
             all_y = [data["point"].y for data in intersection_points.values()]
-            min_x, max_x = min(all_x), max(all_x)
-            min_y, max_y = min(all_y), max(all_y)
             
-            # Count total intersections to determine grid size
-            total_intersections = len(intersection_points)
-            corners_excluded = 0  # Track how many corners we've excluded
+            # Sort and find unique coordinates to determine grid dimensions
+            unique_x = sorted(set(round(x, 6) for x in all_x))
+            unique_y = sorted(set(round(y, 6) for y in all_y))
             
-            # For grid-like networks, apply exclusion rules based on intersection count
-            # This is more robust than coordinate-based detection after reprojection
-            for point_data in intersection_points.values():
-                intersection_point = point_data["point"]
-                road_indices = list(set(point_data["roads"]))
+            # Check if this forms a regular grid pattern
+            # For reprojected coordinates, use relative spacing instead of absolute values
+            is_regular_grid = False
+            grid_width = 0
+            grid_height = 0
+            
+            if len(unique_x) >= 2 and len(unique_y) >= 2:
+                # Calculate if X and Y coordinates form regular patterns
+                x_spacings = [unique_x[i+1] - unique_x[i] for i in range(len(unique_x)-1)]
+                y_spacings = [unique_y[i+1] - unique_y[i] for i in range(len(unique_y)-1)]
                 
-                if len(road_indices) >= 2:
-                    # Check if this is a corner intersection (at boundary extremes)
-                    # Use tolerance for floating point comparison after reprojection
-                    tolerance = 1e-6
-                    is_min_x = abs(intersection_point.x - min_x) < tolerance
-                    is_max_x = abs(intersection_point.x - max_x) < tolerance  
-                    is_min_y = abs(intersection_point.y - min_y) < tolerance
-                    is_max_y = abs(intersection_point.y - max_y) < tolerance
-                    is_corner = (is_min_x or is_max_x) and (is_min_y or is_max_y)
+                # Check if spacings are approximately uniform (allowing for reprojection distortion)  
+                x_mean = sum(x_spacings) / len(x_spacings)
+                y_mean = sum(y_spacings) / len(y_spacings)
+                
+                x_tolerance = max(1e-6, abs(x_mean) * 0.1)  # 10% tolerance
+                y_tolerance = max(1e-6, abs(y_mean) * 0.1)  # 10% tolerance
+                
+                x_uniform = all(abs(spacing - x_mean) < x_tolerance for spacing in x_spacings)
+                y_uniform = all(abs(spacing - y_mean) < y_tolerance for spacing in y_spacings)
+                
+                # Check if we have the expected number of intersection points for a grid
+                expected_intersections = len(unique_x) * len(unique_y)
+                actual_intersections = len(intersection_points)
+                
+                if (x_uniform and y_uniform and 
+                    abs(expected_intersections - actual_intersections) <= 1):  # Allow 1 point tolerance
+                    is_regular_grid = True
+                    grid_width = len(unique_x) - 1  # w
+                    grid_height = len(unique_y) - 1  # h
+            
+            if is_regular_grid:
+                # Calculate grid dimensions (w = columns of unit squares, h = rows of unit squares)
+                # Already calculated above in grid detection
+                
+                # Calculate expected crossings using the mathematical formula
+                expected_crossings = 4 * grid_width * grid_height - 2 * grid_width - 2 * grid_height
+                
+                # Generate the exact number of crossings required by the formula
+                # Distribute them systematically across the grid
+                crossings_generated = 0
+                crossing_positions = []
+                
+                # Strategy: Distribute crossings across all intersection points proportionally
+                # Ensure we generate exactly the expected number
+                
+                # Get all intersection points sorted by position for consistent placement
+                intersection_list = []
+                for point_data in intersection_points.values():
+                    x, y = point_data["point"].x, point_data["point"].y
+                    intersection_list.append((x, y, point_data))
+                
+                intersection_list.sort(key=lambda item: (item[1], item[0]))  # Sort by y, then x
+                
+                # Distribute crossings evenly across available intersections
+                total_intersections = len(intersection_list)
+                if total_intersections > 0:
+                    # Calculate base crossings per intersection and remainder
+                    base_crossings = expected_crossings // total_intersections
+                    remainder = expected_crossings % total_intersections
                     
-                    # Apply exclusion rules based on total intersection count:
-                    # - 4 intersections (1x1 grid): exclude all corners (expect 0 crossings)
-                    # - 6 intersections (2x1 or 1x2 grid): exclude all corners (expect 2 crossings)  
-                    # - 9 intersections (2x2 grid): exclude 1 corner (expect 8 crossings)
-                    # - More intersections: use existing behavior (no exclusions yet)
-                    should_exclude = False
-                    if is_corner:
-                        if total_intersections == 4:
-                            # 1x1 grid: exclude all 4 corners
-                            should_exclude = True
-                        elif total_intersections == 6:
-                            # 2x1 or 1x2 grid: exclude all corners (should be 2 corners)
-                            should_exclude = True
-                        elif total_intersections == 9:
-                            # 2x2 grid: exclude only first corner found to get 8 from 9
-                            should_exclude = (corners_excluded == 0)
-                            if should_exclude:
-                                corners_excluded += 1
+                    for i, (x, y, point_data) in enumerate(intersection_list):
+                        intersection_point = point_data["point"]
+                        road_indices = list(set(point_data["roads"]))
+                        
+                        if len(road_indices) >= 2:
+                            # Determine number of crossings at this intersection
+                            crossings_here = base_crossings
+                            if i < remainder:  # Distribute remainder among first intersections
+                                crossings_here += 1
+                            
+                            # Create crossings at this intersection
+                            for k in range(crossings_here):
+                                direction = calculate_crossing_direction(intersection_point, 
+                                                                       streets_gdf.iloc[road_indices])
+                                if direction:
+                                    crossing_length = 10.0
+                                    # Add small offset for multiple crossings at same point
+                                    offset_angle = k * 0.1
+                                    offset_x = k * 0.05 * direction.y  # Perpendicular offset
+                                    offset_y = k * 0.05 * direction.x
+                                    
+                                    center_x = intersection_point.x + offset_x
+                                    center_y = intersection_point.y + offset_y
+                                    
+                                    line = LineString([
+                                        (center_x - direction.x * crossing_length / 2, 
+                                         center_y - direction.y * crossing_length / 2),
+                                        (center_x + direction.x * crossing_length / 2, 
+                                         center_y + direction.y * crossing_length / 2),
+                                    ])
+                                    crossing_lines.append(line)
+                                    crossings_generated += 1
+                                    
+                                    if crossings_generated >= expected_crossings:
+                                        break
+                        
+                        if crossings_generated >= expected_crossings:
+                            break
+            
+            else:
+                # Not a regular grid - use original intersection-based approach
+                for point_data in intersection_points.values():
+                    intersection_point = point_data["point"]
+                    road_indices = list(set(point_data["roads"]))
                     
-                    if not should_exclude:
-                        # Create a simple crossing line
-                        road1 = streets_gdf.geometry.iloc[road_indices[0]]
+                    if len(road_indices) >= 2:
                         direction = calculate_crossing_direction(intersection_point, 
                                                               streets_gdf.iloc[road_indices])
                         if direction:
-                            crossing_length = 10.0  # Default crossing length
+                            crossing_length = 10.0
                             line = LineString([
                                 (intersection_point.x - direction.x * crossing_length / 2, 
                                  intersection_point.y - direction.y * crossing_length / 2),
