@@ -13,7 +13,9 @@ The library now provides two ways to use the sidewalk generation algorithm:
 
 ### 1. GeoDataFrame-based API (Recommended)
 
-The new `sidewalkreator()` function accepts and returns GeoDataFrames, giving users full control over I/O.
+The `sidewalkreator()` function accepts and returns GeoDataFrames, giving users full control over I/O.
+
+> **Note**: This function was previously named `generate_sidewalks_gdf()`. The old name is still available for backward compatibility but is deprecated.
 
 **Input options (choose one):**
 

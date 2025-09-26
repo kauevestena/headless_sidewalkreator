@@ -274,7 +274,7 @@ def full_sidewalkreator_algorithm(
     This function orchestrates the entire sidewalk generation process, from
     reading the input polygon to generating the final output files.
     
-    This is a file-based wrapper around generate_sidewalks_gdf() for backward compatibility.
+    This is a file-based wrapper around sidewalkreator() for backward compatibility.
 
     Args:
         input_polygon_path: Path to the GeoJSON file containing the input polygon.
