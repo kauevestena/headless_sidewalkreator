@@ -48,6 +48,56 @@ def bbox_to_gdf(bbox: tuple, crs: str = "EPSG:4326") -> gpd.GeoDataFrame:
     return gpd.GeoDataFrame(geometry=[polygon], crs=crs)
 
 
+def grid_lines(width: int, height: int):
+    """
+    Create a grid of axis-aligned LineStrings that overlap (no explicit intersection nodes).
+
+    Rules
+    -----
+    - The grid contains `width * height` unit squares.
+    - Vertical grid lines are placed at x = 1..(width+1) and run from y = 0 to y = height+2.
+    - Horizontal grid lines are placed at y = 1..(height+1) and run from x = 0 to x = width+2.
+    - This yields a one-unit overhang beyond the grid in all four directions.
+
+    Parameters
+    ----------
+    width : int  (> 0)
+    height: int  (> 0)
+
+    Returns
+    -------
+    list[LineString] : vertical lines first (left→right), then horizontal lines (bottom→top).
+
+    Example (width=1, height=1)
+    ---------------------------
+    Returns 4 LineStrings with endpoints:
+      (1,0)-(1,3), (2,0)-(2,3), (0,1)-(3,1), (0,2)-(3,2)
+    i.e. the 8 points: (1,0), (2,0), (0,1), (0,2), (1,3), (2,3), (3,2), (3,1)
+    """
+    # Validate inputs
+    if isinstance(width, bool) or isinstance(height, bool):
+        raise TypeError("width and height must be positive integers > 0 (bool not allowed).")
+    if not isinstance(width, int) or not isinstance(height, int):
+        raise TypeError("width and height must be integers.")
+    if width <= 0 or height <= 0:
+        raise ValueError("width and height must be > 0.")
+
+    x_min, x_max = 0, width + 2
+    y_min, y_max = 0, height + 2
+
+    lines = []
+
+    # Vertical lines: x = 1..width+1
+    for x in range(1, width + 2):
+        lines.append(LineString([(x, y_min), (x, y_max)]))
+
+    # Horizontal lines: y = 1..height+1
+    for y in range(1, height + 2):
+        lines.append(LineString([(x_min, y), (x_max, y)]))
+
+    return lines
+
+
 import osmnx as ox
 from .osm_fetch import get_osm_data
 
