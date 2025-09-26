@@ -6,6 +6,7 @@ This module exposes the full_sidewalkreator_algorithm function.
 import os
 import json
 import geopandas as gpd
+import osmnx as ox
 from .generic_functions import (
     read_input_polygon,
     get_bbox_from_gdf,
@@ -27,7 +28,8 @@ from . import parameters as params
 
 
 def generate_sidewalks_gdf(
-    input_polygon_gdf: gpd.GeoDataFrame,
+    input_polygon_gdf: gpd.GeoDataFrame = None,
+    place_name: str = None,
     osm_gdf: gpd.GeoDataFrame = None,
     parameters: dict = None,
     ignore_existing: bool = False,
@@ -40,6 +42,8 @@ def generate_sidewalks_gdf(
     
     Args:
         input_polygon_gdf: GeoDataFrame containing the input polygon geometry.
+        place_name: A string to be geocoded to a polygon boundary for the area of interest.
+                    Use this OR input_polygon_gdf, not both.
         osm_gdf: Optional GeoDataFrame with OSM data to be used instead of fetching.
                 If None, OSM data will be fetched automatically for the input polygon's bbox.
         parameters: Optional dictionary with runtime parameters to override defaults.
@@ -80,8 +84,19 @@ def generate_sidewalks_gdf(
     if parameters:
         run_params.update(parameters)
 
-    # 1. Input polygon is already provided as GeoDataFrame
-    input_gdf = input_polygon_gdf.copy()
+    # 1. Determine input area from either place_name or input_polygon_gdf
+    if place_name and input_polygon_gdf is not None:
+        raise ValueError("Provide either 'place_name' or 'input_polygon_gdf', not both.")
+
+    if place_name:
+        # Geocode the place name to a GeoDataFrame
+        print(f"Geocoding place_name: '{place_name}'")
+        input_gdf = ox.geocode_to_gdf(place_name)
+    elif input_polygon_gdf is not None:
+        # Use the provided GeoDataFrame
+        input_gdf = input_polygon_gdf.copy()
+    else:
+        raise ValueError("Either 'place_name' or 'input_polygon_gdf' must be provided.")
 
     # 2. Get bounding box
     bbox = get_bbox_from_gdf(input_gdf)
@@ -233,8 +248,9 @@ def generate_sidewalks_gdf(
 
 
 def full_sidewalkreator_algorithm(
-    input_polygon_path: str,
-    output_directory: str,
+    input_polygon_path: str = None,
+    output_directory: str = None,
+    place_name: str = None,
     parameters_path: str = None,
     osm_gdf: gpd.GeoDataFrame = None,
     ignore_existing: bool = False,
@@ -249,11 +265,16 @@ def full_sidewalkreator_algorithm(
     Args:
         input_polygon_path: Path to the GeoJSON file containing the input polygon.
         output_directory: Directory where the output files will be saved.
+        place_name: A string to be geocoded to a polygon boundary for the area of interest.
+                    Use this OR input_polygon_path, not both.
         parameters_path: Optional path to a JSON file with parameters.
         osm_gdf: Optional GeoDataFrame with OSM data to be used instead of fetching.
         ignore_existing: If True, ignores existing sidewalks and generates all
             possible sidewalks without filtering based on pre-existing coverage.
     """
+
+    if not output_directory:
+        raise ValueError("'output_directory' must be provided.")
 
     # Load parameters from file if provided
     parameters = {}
@@ -265,15 +286,18 @@ def full_sidewalkreator_algorithm(
     if not os.path.exists(output_directory):
         os.makedirs(output_directory)
 
-    # 1. Load input polygon
-    input_gdf = read_input_polygon(input_polygon_path)
+    # 1. Load input polygon if path is provided
+    input_gdf = None
+    if input_polygon_path:
+        input_gdf = read_input_polygon(input_polygon_path)
 
     # 2. Use the new GeoDataFrame-based API
     result = generate_sidewalks_gdf(
         input_polygon_gdf=input_gdf,
+        place_name=place_name,
         osm_gdf=osm_gdf,
         parameters=parameters,
-        ignore_existing=ignore_existing
+        ignore_existing=ignore_existing,
     )
     
     # Extract results

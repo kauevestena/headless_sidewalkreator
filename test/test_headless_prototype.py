@@ -67,14 +67,16 @@ def test_main_cli_entrypoint(setup_test_dir):
             sys.executable,
             "-m",
             "headless_sidewalkreator.main",
+            "--input-file",
             input_polygon,
+            "--output-dir",
             output_dir,
         ],
         capture_output=True,
         text=True,
     )
 
-    assert result.returncode == 0
+    assert result.returncode == 0, f"CLI process failed with output:\n{result.stderr}"
     assert "Process complete" in result.stdout
 
 
@@ -95,7 +97,9 @@ def test_main_cli_with_ignore_existing_flag(setup_test_dir):
             sys.executable,
             "-m",
             "headless_sidewalkreator.main",
+            "--input-file",
             input_polygon,
+            "--output-dir",
             output_dir,
             "--ignore-existing",
         ],
@@ -103,7 +107,7 @@ def test_main_cli_with_ignore_existing_flag(setup_test_dir):
         text=True,
     )
 
-    assert result.returncode == 0
+    assert result.returncode == 0, f"CLI process failed with output:\n{result.stderr}"
     assert "Process complete" in result.stdout
 
 
