@@ -215,3 +215,53 @@ def test_ignore_existing_parameter(setup_test_dir, osm_sample_gdf):
     # Both should generate some sidewalks
     print(f"Normal mode generated {len(normal_gdf)} sidewalks")
     print(f"Ignore existing mode generated {len(ignore_gdf)} sidewalks")
+
+
+def test_main_cli_with_bbox(setup_test_dir):
+    """Test the command-line entry point with bbox parameter."""
+    import subprocess
+    import sys
+
+    test_dir = setup_test_dir
+    output_dir = os.path.join(test_dir, "cli_bbox_output")
+
+    # Use a small bbox to avoid long processing times
+    bbox = [-0.01, -0.01, 0.01, 0.01]
+
+    # Run the main.py script with bbox argument
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "headless_sidewalkreator.main",
+            "--bbox",
+            str(bbox[0]),
+            str(bbox[1]),
+            str(bbox[2]),
+            str(bbox[3]),
+            "--output-dir",
+            output_dir,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60  # Add timeout to prevent hanging
+    )
+
+    assert result.returncode == 0, f"CLI process failed with output:\n{result.stderr}"
+    assert "Process complete" in result.stdout
+    
+    # Verify that output files were created
+    assert os.path.exists(output_dir)
+    assert os.path.exists(os.path.join(output_dir, "sidewalks_output.geojson"))
+    assert os.path.exists(os.path.join(output_dir, "auxiliary", "input_polygon.geojson"))
+    
+    # Verify the input polygon was created from bbox
+    input_polygon_file = os.path.join(output_dir, "auxiliary", "input_polygon.geojson")
+    input_gdf = gpd.read_file(input_polygon_file)
+    bounds = input_gdf.total_bounds
+    
+    # Check that the bounds approximately match the input bbox
+    assert abs(bounds[0] - bbox[0]) < 1e-10  # minx
+    assert abs(bounds[1] - bbox[1]) < 1e-10  # miny
+    assert abs(bounds[2] - bbox[2]) < 1e-10  # maxx
+    assert abs(bounds[3] - bbox[3]) < 1e-10  # maxy

@@ -10,6 +10,7 @@ import osmnx as ox
 from .generic_functions import (
     read_input_polygon,
     get_bbox_from_gdf,
+    bbox_to_gdf,
     fetch_street_network_for_bbox,
     clip_gdf,
     reproject_gdf,
@@ -30,6 +31,7 @@ from . import parameters as params
 def generate_sidewalks_gdf(
     input_polygon_gdf: gpd.GeoDataFrame = None,
     place_name: str = None,
+    bbox: tuple = None,
     osm_gdf: gpd.GeoDataFrame = None,
     parameters: dict = None,
     ignore_existing: bool = False,
@@ -43,7 +45,9 @@ def generate_sidewalks_gdf(
     Args:
         input_polygon_gdf: GeoDataFrame containing the input polygon geometry.
         place_name: A string to be geocoded to a polygon boundary for the area of interest.
-                    Use this OR input_polygon_gdf, not both.
+                    Use this OR input_polygon_gdf OR bbox, not multiple.
+        bbox: A tuple (minx, miny, maxx, maxy) defining a rectangular bounding box area of interest.
+              Use this OR input_polygon_gdf OR place_name, not multiple.
         osm_gdf: Optional GeoDataFrame with OSM data to be used instead of fetching.
                 If None, OSM data will be fetched automatically for the input polygon's bbox.
         parameters: Optional dictionary with runtime parameters to override defaults.
@@ -57,7 +61,8 @@ def generate_sidewalks_gdf(
         - 'kerbs': Kerb point geometries
         - 'protoblocks': Intermediate protoblocks (for debugging)
         - 'intersection_points': Intersection points used in processing
-        - 'pois': Points of interest (building centroids, addresses, amenities) 
+        - 'pois': Points of interest (building centroids, addresses, amenities)
+        - 'input_area': The input area geometry used (for compatibility)
         - 'parameters': Runtime parameters that were used
     """
     
@@ -84,9 +89,12 @@ def generate_sidewalks_gdf(
     if parameters:
         run_params.update(parameters)
 
-    # 1. Determine input area from either place_name or input_polygon_gdf
-    if place_name and input_polygon_gdf is not None:
-        raise ValueError("Provide either 'place_name' or 'input_polygon_gdf', not both.")
+    # 1. Determine input area from either place_name, input_polygon_gdf, or bbox
+    input_sources = [place_name, input_polygon_gdf, bbox]
+    provided_sources = [src for src in input_sources if src is not None]
+    
+    if len(provided_sources) != 1:
+        raise ValueError("Provide exactly one of 'place_name', 'input_polygon_gdf', or 'bbox'.")
 
     if place_name:
         # Geocode the place name to a GeoDataFrame
@@ -95,8 +103,12 @@ def generate_sidewalks_gdf(
     elif input_polygon_gdf is not None:
         # Use the provided GeoDataFrame
         input_gdf = input_polygon_gdf.copy()
+    elif bbox is not None:
+        # Convert bounding box to GeoDataFrame
+        print(f"Converting bbox to GeoDataFrame: {bbox}")
+        input_gdf = bbox_to_gdf(bbox)
     else:
-        raise ValueError("Either 'place_name' or 'input_polygon_gdf' must be provided.")
+        raise ValueError("Either 'place_name', 'input_polygon_gdf', or 'bbox' must be provided.")
 
     # 2. Get bounding box
     bbox = get_bbox_from_gdf(input_gdf)
@@ -240,6 +252,7 @@ def generate_sidewalks_gdf(
         'protoblocks': protoblocks_gdf,
         'intersection_points': intersection_points_gdf,
         'pois': unified_pois_gdf,  # Add POI data to output
+        'input_area': input_gdf,  # Add input area for legacy file-based function
         'parameters': run_params,
     }
     
@@ -251,6 +264,7 @@ def full_sidewalkreator_algorithm(
     input_polygon_path: str = None,
     output_directory: str = None,
     place_name: str = None,
+    bbox: tuple = None,
     parameters_path: str = None,
     osm_gdf: gpd.GeoDataFrame = None,
     ignore_existing: bool = False,
@@ -266,7 +280,9 @@ def full_sidewalkreator_algorithm(
         input_polygon_path: Path to the GeoJSON file containing the input polygon.
         output_directory: Directory where the output files will be saved.
         place_name: A string to be geocoded to a polygon boundary for the area of interest.
-                    Use this OR input_polygon_path, not both.
+                    Use this OR input_polygon_path OR bbox, not multiple.
+        bbox: A tuple (minx, miny, maxx, maxy) defining a rectangular bounding box area of interest.
+              Use this OR input_polygon_path OR place_name, not multiple.
         parameters_path: Optional path to a JSON file with parameters.
         osm_gdf: Optional GeoDataFrame with OSM data to be used instead of fetching.
         ignore_existing: If True, ignores existing sidewalks and generates all
@@ -295,6 +311,7 @@ def full_sidewalkreator_algorithm(
     result = generate_sidewalks_gdf(
         input_polygon_gdf=input_gdf,
         place_name=place_name,
+        bbox=bbox,
         osm_gdf=osm_gdf,
         parameters=parameters,
         ignore_existing=ignore_existing,
@@ -308,6 +325,9 @@ def full_sidewalkreator_algorithm(
     intersection_points_gdf = result['intersection_points']
     unified_pois_gdf = result['pois']
     run_params = result['parameters']
+    
+    # Get the actual input area that was used (either from file, place_name, or bbox)
+    actual_input_gdf = result['input_area']
 
     # 3. Write outputs to files for backward compatibility
     # Save auxiliary files
@@ -316,7 +336,7 @@ def full_sidewalkreator_algorithm(
         os.makedirs(auxiliary_output_directory)
 
     input_polygon_output_path = os.path.join(auxiliary_output_directory, "input_polygon.geojson")
-    input_gdf.to_crs("EPSG:4326").to_file(input_polygon_output_path, driver="GeoJSON")
+    actual_input_gdf.to_crs("EPSG:4326").to_file(input_polygon_output_path, driver="GeoJSON")
 
     intersection_points_output_path = os.path.join(auxiliary_output_directory, "intersection_points.geojson")
     if not intersection_points_gdf.empty:

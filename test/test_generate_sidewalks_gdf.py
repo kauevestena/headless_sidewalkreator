@@ -2,6 +2,7 @@
 
 import geopandas as gpd
 import pytest
+from unittest.mock import patch
 from shapely.geometry import Polygon
 from headless_sidewalkreator import generate_sidewalks_gdf
 from headless_sidewalkreator import parameters as params
@@ -25,7 +26,7 @@ def test_generate_sidewalks_gdf_basic(osm_sample_gdf):
     assert isinstance(result, dict)
     
     # Check that all expected keys are present
-    expected_keys = ['sidewalks', 'crossings', 'kerbs', 'protoblocks', 'intersection_points', 'parameters']
+    expected_keys = ['sidewalks', 'crossings', 'kerbs', 'protoblocks', 'intersection_points', 'pois', 'input_area', 'parameters']
     for key in expected_keys:
         assert key in result, f"Key '{key}' missing from result"
     
@@ -232,7 +233,7 @@ def test_generate_sidewalks_gdf_from_place_name():
     assert isinstance(result, dict)
 
     # Check that all expected keys are present
-    expected_keys = ['sidewalks', 'crossings', 'kerbs', 'protoblocks', 'intersection_points', 'parameters']
+    expected_keys = ['sidewalks', 'crossings', 'kerbs', 'protoblocks', 'intersection_points', 'pois', 'input_area', 'parameters']
     for key in expected_keys:
         assert key in result, f"Key '{key}' missing from result"
 
@@ -243,17 +244,66 @@ def test_generate_sidewalks_gdf_from_place_name():
     assert result['sidewalks'].crs.is_projected
 
 def test_generate_sidewalks_gdf_input_validation():
-    """Test that providing both place_name and input_polygon_gdf raises an error."""
+    """Test input validation for generate_sidewalks_gdf."""
 
     polygon = Polygon([(-1, -1), (-1, 2), (2, 2), (2, -1), (-1, -1)])
     input_polygon_gdf = gpd.GeoDataFrame(geometry=[polygon], crs="EPSG:4326")
     place_name = "Amherst, MA"
+    bbox = (-1, -1, 2, 2)
 
-    with pytest.raises(ValueError, match="Provide either 'place_name' or 'input_polygon_gdf', not both."):
+    # Test providing multiple input sources
+    with pytest.raises(ValueError, match="Provide exactly one of 'place_name', 'input_polygon_gdf', or 'bbox'."):
         generate_sidewalks_gdf(
             input_polygon_gdf=input_polygon_gdf,
             place_name=place_name
         )
 
-    with pytest.raises(ValueError, match="Either 'place_name' or 'input_polygon_gdf' must be provided."):
+    with pytest.raises(ValueError, match="Provide exactly one of 'place_name', 'input_polygon_gdf', or 'bbox'."):
+        generate_sidewalks_gdf(
+            input_polygon_gdf=input_polygon_gdf,
+            bbox=bbox
+        )
+
+    with pytest.raises(ValueError, match="Provide exactly one of 'place_name', 'input_polygon_gdf', or 'bbox'."):
+        generate_sidewalks_gdf(
+            place_name=place_name,
+            bbox=bbox
+        )
+
+    with pytest.raises(ValueError, match="Provide exactly one of 'place_name', 'input_polygon_gdf', or 'bbox'."):
+        generate_sidewalks_gdf(
+            input_polygon_gdf=input_polygon_gdf,
+            place_name=place_name,
+            bbox=bbox
+        )
+
+    # Test providing no input source
+    with pytest.raises(ValueError, match="Provide exactly one of 'place_name', 'input_polygon_gdf', or 'bbox'."):
         generate_sidewalks_gdf()
+
+
+@patch('headless_sidewalkreator.full_sidewalkreator_algorithm.fetch_street_network_for_bbox')
+def test_generate_sidewalks_gdf_with_bbox(mock_fetch, osm_sample_gdf):
+    """Test generate_sidewalks_gdf with bbox input."""
+    # Mock the OSM data fetch
+    mock_fetch.return_value = osm_sample_gdf
+    
+    # Define a simple bounding box
+    bbox = (-1, -1, 2, 2)
+    
+    # Call the function with bbox
+    result = generate_sidewalks_gdf(
+        bbox=bbox,
+        osm_gdf=osm_sample_gdf,
+        parameters={"buffer_dist": 1.0}
+    )
+    
+    # Verify the result structure
+    assert isinstance(result, dict)
+    expected_keys = {'sidewalks', 'crossings', 'kerbs', 'protoblocks', 'intersection_points', 'pois', 'input_area', 'parameters'}
+    assert set(result.keys()) == expected_keys
+    
+    # Verify that bbox was converted to GeoDataFrame internally by checking we got results
+    assert isinstance(result['sidewalks'], gpd.GeoDataFrame)
+    assert isinstance(result['parameters'], dict)
+    assert result['parameters']['buffer_dist'] == 1.0
