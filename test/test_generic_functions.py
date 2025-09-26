@@ -20,6 +20,7 @@ from headless_sidewalkreator.generic_functions import (
     handle_sidewalk_tags,
     calculate_crossing_direction,
     generate_kerbs_gdf,
+    bbox_to_gdf,
 )
 from headless_sidewalkreator.parameters import default_widths, fallback_default_width
 
@@ -341,3 +342,26 @@ def test_merge_short_segments_gdf():
     assert len(merged_gdf) < 3
     # The total length should be preserved
     assert sidewalks_gdf.geometry.length.sum() == merged_gdf.geometry.length.sum()
+
+
+def test_bbox_to_gdf():
+    """Test bbox_to_gdf utility function."""
+    bbox = (-1, -1, 2, 2)
+    gdf = bbox_to_gdf(bbox)
+    
+    # Check it returns a GeoDataFrame with one polygon
+    assert isinstance(gdf, gpd.GeoDataFrame)
+    assert len(gdf) == 1
+    assert isinstance(gdf.geometry.iloc[0], Polygon)
+    assert gdf.crs.to_string() == "EPSG:4326"
+    
+    # Check the bounds match the input bbox
+    bounds = gdf.total_bounds
+    assert bounds[0] == -1  # minx
+    assert bounds[1] == -1  # miny  
+    assert bounds[2] == 2   # maxx
+    assert bounds[3] == 2   # maxy
+    
+    # Test with custom CRS
+    gdf_utm = bbox_to_gdf(bbox, crs="EPSG:3857")
+    assert gdf_utm.crs.to_string() == "EPSG:3857"

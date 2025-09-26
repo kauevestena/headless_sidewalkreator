@@ -33,6 +33,21 @@ def get_bbox_from_gdf(gdf: gpd.GeoDataFrame) -> tuple:
     return gdf.total_bounds
 
 
+def bbox_to_gdf(bbox: tuple, crs: str = "EPSG:4326") -> gpd.GeoDataFrame:
+    """Converts a bounding box tuple to a GeoDataFrame with a rectangular polygon.
+
+    Args:
+        bbox: A tuple representing the bounding box (minx, miny, maxx, maxy).
+        crs: The coordinate reference system for the output GeoDataFrame.
+
+    Returns:
+        A GeoDataFrame containing a single rectangular polygon geometry.
+    """
+    minx, miny, maxx, maxy = bbox
+    polygon = Polygon([(minx, miny), (minx, maxy), (maxx, maxy), (maxx, miny), (minx, miny)])
+    return gpd.GeoDataFrame(geometry=[polygon], crs=crs)
+
+
 import osmnx as ox
 from .osm_fetch import get_osm_data
 
