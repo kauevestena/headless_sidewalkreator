@@ -214,3 +214,46 @@ def test_generate_sidewalks_gdf_return_structure():
     ]
     for key in param_keys:
         assert key in result['parameters'], f"Parameter key '{key}' missing"
+
+
+@pytest.mark.skip(reason="This test requires a live API call to OSM and is slow. Enable for integration testing.")
+def test_generate_sidewalks_gdf_from_place_name():
+    """Test using a place_name to define the area of interest."""
+
+    # Using a small, well-defined place to limit query size
+    place_name = "Amherst, Massachusetts, USA"
+
+    result = generate_sidewalks_gdf(
+        place_name=place_name,
+        ignore_existing=True  # Ignore existing sidewalks for a more predictable test
+    )
+
+    # Check that result is a dictionary
+    assert isinstance(result, dict)
+
+    # Check that all expected keys are present
+    expected_keys = ['sidewalks', 'crossings', 'kerbs', 'protoblocks', 'intersection_points', 'parameters']
+    for key in expected_keys:
+        assert key in result, f"Key '{key}' missing from result"
+
+    # Check that some sidewalks were generated (this is a reasonable expectation for a town)
+    assert not result['sidewalks'].empty, "Sidewalks GeoDataFrame should not be empty for a real place"
+
+    # Check that the CRS is a projected CRS, indicating successful reprojection
+    assert result['sidewalks'].crs.is_projected
+
+def test_generate_sidewalks_gdf_input_validation():
+    """Test that providing both place_name and input_polygon_gdf raises an error."""
+
+    polygon = Polygon([(-1, -1), (-1, 2), (2, 2), (2, -1), (-1, -1)])
+    input_polygon_gdf = gpd.GeoDataFrame(geometry=[polygon], crs="EPSG:4326")
+    place_name = "Amherst, MA"
+
+    with pytest.raises(ValueError, match="Provide either 'place_name' or 'input_polygon_gdf', not both."):
+        generate_sidewalks_gdf(
+            input_polygon_gdf=input_polygon_gdf,
+            place_name=place_name
+        )
+
+    with pytest.raises(ValueError, match="Either 'place_name' or 'input_polygon_gdf' must be provided."):
+        generate_sidewalks_gdf()
