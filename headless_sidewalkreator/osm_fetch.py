@@ -179,8 +179,7 @@ def get_osm_data(bbox: Tuple[float, float, float, float], tags: Optional[Dict[st
 
         # All retries failed
         logger.error("Failed to fetch OSM data after %d attempts: %s", max_retries + 1, last_exc)
-        # Return empty GeoDataFrame instead of raising an error to prevent timeouts from stopping the entire process
-        return gpd.GeoDataFrame(columns=['geometry'])
+        raise RuntimeError(f"Failed to fetch OSM data: {last_exc}") from last_exc
         
     finally:
         # Always restore original OSMnx settings

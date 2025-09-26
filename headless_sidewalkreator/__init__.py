@@ -3,7 +3,12 @@
 Lightweight package initializer exposing the public API.
 """
 
-from .main import run_headless  # re-export for convenience
-from .full_sidewalkreator_algorithm import generate_sidewalks_gdf
+from .full_sidewalkreator_algorithm import (
+    full_sidewalkreator_algorithm,
+    generate_sidewalks_gdf,
+)
 
-__all__ = ["run_headless", "generate_sidewalks_gdf"]
+# Alias for backward compatibility, as the old `main.py` did this.
+run_headless = full_sidewalkreator_algorithm
+
+__all__ = ["run_headless", "generate_sidewalks_gdf", "full_sidewalkreator_algorithm"]
