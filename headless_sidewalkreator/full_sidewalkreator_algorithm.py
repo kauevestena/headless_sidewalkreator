@@ -217,6 +217,7 @@ def sidewalkreator(
     crossings_gdf = draw_crossings_gdf(
         splitted_gdf,
         sidewalks_gdf,
+        protoblocks_gdf,
         increment_inward=run_params["increment_inward"],
         max_crossings_iterations=run_params["max_crossings_iterations"],
         abs_max_crossing_len=run_params["abs_max_crossing_len"],
