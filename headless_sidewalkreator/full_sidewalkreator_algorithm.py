@@ -28,6 +28,104 @@ from .generic_functions import (
 from . import parameters as params
 
 
+def generate_protoblocks(
+    input_polygon_gdf: gpd.GeoDataFrame = None,
+    place_name: str = None,
+    bbox: tuple = None,
+    osm_gdf: gpd.GeoDataFrame = None,
+    parameters: dict = None,
+) -> gpd.GeoDataFrame:
+    """Generate protoblocks from input area and OSM data.
+    
+    This function generates protoblocks (enclosed areas formed by road networks)
+    independently of the full sidewalk generation process. Protoblocks are created
+    by fetching street data, cleaning it, splitting at intersections, and polygonizing
+    the resulting line network.
+    
+    Args:
+        input_polygon_gdf: GeoDataFrame containing the input polygon geometry.
+        place_name: A string to be geocoded to a polygon boundary for the area of interest.
+                    Use this OR input_polygon_gdf OR bbox, not multiple.
+        bbox: A tuple (minx, miny, maxx, maxy) defining a rectangular bounding box area of interest.
+              Use this OR input_polygon_gdf OR place_name, not multiple.
+        osm_gdf: Optional GeoDataFrame with OSM data to be used instead of fetching.
+                If None, OSM data will be fetched automatically for the input polygon's bbox.
+        parameters: Optional dictionary with runtime parameters to override defaults.
+    
+    Returns:
+        GeoDataFrame containing the protoblocks (polygon geometries).
+    """
+    print("--- generate_protoblocks called ---")
+    
+    # Consolidate parameters
+    run_params = {
+        "timeout": 60,
+        "default_widths": params.default_widths,
+        "fallback_default_width": params.fallback_default_width,
+    }
+    
+    if parameters:
+        run_params.update(parameters)
+
+    # 1. Determine input area from either place_name, input_polygon_gdf, or bbox
+    input_sources = [place_name, input_polygon_gdf, bbox]
+    provided_sources = [src for src in input_sources if src is not None]
+    
+    if len(provided_sources) != 1:
+        raise ValueError("Provide exactly one of 'place_name', 'input_polygon_gdf', or 'bbox'.")
+
+    if place_name:
+        # Geocode the place name to a GeoDataFrame
+        print(f"Geocoding place_name: '{place_name}'")
+        input_gdf = ox.geocode_to_gdf(place_name)
+    elif input_polygon_gdf is not None:
+        # Use the provided GeoDataFrame
+        input_gdf = input_polygon_gdf.copy()
+    elif bbox is not None:
+        # Convert bounding box to GeoDataFrame
+        print(f"Converting bbox to GeoDataFrame: {bbox}")
+        input_gdf = bbox_to_gdf(bbox)
+    else:
+        raise ValueError("Either 'place_name', 'input_polygon_gdf', or 'bbox' must be provided.")
+
+    # 2. Get bounding box
+    bbox = get_bbox_from_gdf(input_gdf)
+
+    # 3. Fetch OSM Data (allow injection via `osm_gdf`)
+    if osm_gdf is None:
+        osm_gdf = fetch_street_network_for_bbox(bbox, timeout=run_params["timeout"])
+    print("Step 3 complete.")
+
+    # 4. Clip data
+    clipped_gdf = clip_gdf(osm_gdf, input_gdf)
+    print("Step 4 complete.")
+
+    # 5. Reproject to a local TM
+    utm_crs = input_gdf.estimate_utm_crs()
+    clipped_reproj_gdf = reproject_gdf(clipped_gdf, utm_crs)
+    print("Step 5 complete.")
+
+    # 6. Clean data
+    cleaned_gdf, existing_sidewalks, existing_crossings = data_clean_gdf(
+        clipped_reproj_gdf,
+        run_params["default_widths"],
+        run_params["fallback_default_width"],
+    )
+    print("Step 6 complete.")
+
+    # 7. Split lines at intersections
+    lines_gdf = cleaned_gdf[cleaned_gdf.geometry.type == "LineString"].copy()
+    splitted_gdf = split_lines_at_intersections(lines_gdf)
+    print("Step 7 complete.")
+
+    # 8. Create protoblocks from polygonizing
+    protoblocks_gdf = polygonize_lines_gdf(splitted_gdf)
+    print("Step 8 complete.")
+
+    print("Protoblocks generation complete.")
+    return protoblocks_gdf
+
+
 def sidewalkreator(
     input_polygon_gdf: gpd.GeoDataFrame = None,
     place_name: str = None,
