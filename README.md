@@ -11,7 +11,7 @@ requirements files.
 
 The library now provides two ways to use the sidewalk generation algorithm:
 
-### 1. GeoDataFrame-based API (Recommended)
+### GeoDataFrame-based API
 
 The `sidewalkreator()` function accepts and returns GeoDataFrames, giving users full control over I/O.
 
@@ -71,21 +71,6 @@ sidewalkreator --bbox -72.53 42.37 -72.52 42.38 --output-dir ./output --ignore-e
 ```
 
 **Alternative**: The tool can also be invoked using `python -m headless_sidewalkreator` with the same arguments.
-
-### 2. File-based API (Legacy)
-
-The original `run_headless()` function still works for backward compatibility:
-
-```python
-from headless_sidewalkreator import run_headless
-
-# Original file-based interface
-run_headless(
-    input_polygon_path="input.geojson",
-    output_directory="output/",
-    parameters_path="params.json"  # Optional
-)
-```
 
 ## Development setup
 
