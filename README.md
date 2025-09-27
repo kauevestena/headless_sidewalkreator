@@ -9,9 +9,9 @@ requirements files.
 
 ## API Overview
 
-The library now provides two ways to use the sidewalk generation algorithm:
+The library provides several APIs for different use cases:
 
-### GeoDataFrame-based API
+### Full Sidewalk Generation API
 
 The `sidewalkreator()` function accepts and returns GeoDataFrames, giving users full control over I/O.
 
@@ -50,6 +50,26 @@ parameters_used = result['parameters']
 # User handles output as needed
 sidewalks.to_file("output_sidewalks.geojson")
 crossings.to_file("output_crossings.gpkg")
+```
+
+### Standalone Protoblocks Generation API
+
+The `generate_protoblocks()` function generates only the protoblocks (enclosed areas formed by street networks) without creating sidewalks. This is useful for urban analysis, block-level studies, or as input for other algorithms.
+
+```python
+from headless_sidewalkreator import generate_protoblocks
+import geopandas as gpd
+
+# Same input options as sidewalkreator
+protoblocks = generate_protoblocks(
+    input_polygon_gdf=your_polygon_gdf
+    # OR place_name="Your City, State"
+    # OR bbox=(minx, miny, maxx, maxy)
+)
+
+# Result is a GeoDataFrame of polygon geometries
+print(f"Generated {len(protoblocks)} protoblocks")
+protoblocks.to_file("protoblocks_output.geojson")
 ```
 
 ## Command-Line Usage
