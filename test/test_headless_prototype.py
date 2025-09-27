@@ -4,7 +4,10 @@ import json
 import geopandas as gpd
 import pytest
 from unittest.mock import patch
-from headless_sidewalkreator import run_headless
+from headless_sidewalkreator import sidewalkreator
+from headless_sidewalkreator.main import save_results_to_directory
+from headless_sidewalkreator.generic_functions import read_input_polygon
+from shapely.geometry import Polygon
 
 
 @pytest.fixture
@@ -19,26 +22,48 @@ def setup_test_dir():
         shutil.rmtree(test_dir)
 
 
-def test_run_headless(setup_test_dir, osm_sample_gdf):
-    """Test the main run_headless function."""
+@pytest.fixture
+def test_polygon_gdf():
+    """Create a simple test polygon GeoDataFrame."""
+    # Create a simple rectangular polygon
+    polygon = Polygon([(0, 0), (1, 0), (1, 1), (0, 1), (0, 0)])
+    gdf = gpd.GeoDataFrame([{'geometry': polygon}], crs='EPSG:4326')
+    return gdf
+
+
+def test_sidewalkreator_api(setup_test_dir, test_polygon_gdf, osm_sample_gdf):
+    """Test the new sidewalkreator API and save results to directory."""
     test_dir = setup_test_dir
-    input_polygon = os.path.join(
-        os.path.dirname(__file__), "extra_tests", "polygon02.geojson"
+
+    # Use the new GeoDataFrame-based API
+    result = sidewalkreator(
+        input_polygon_gdf=test_polygon_gdf,
+        osm_gdf=osm_sample_gdf
     )
 
-    # Inject deterministic OSM data for testability
-    run_headless(input_polygon, test_dir, osm_gdf=osm_sample_gdf)
+    # Verify the result structure
+    expected_keys = ['sidewalks', 'crossings', 'kerbs', 'protoblocks', 'intersection_points', 'pois', 'input_area', 'parameters']
+    for key in expected_keys:
+        assert key in result, f"Key '{key}' missing from result"
+    
+    # Verify GeoDataFrames
+    assert isinstance(result['sidewalks'], gpd.GeoDataFrame)
+    assert isinstance(result['crossings'], gpd.GeoDataFrame)
+    assert isinstance(result['kerbs'], gpd.GeoDataFrame)
+    assert isinstance(result['protoblocks'], gpd.GeoDataFrame)
 
-    # Check if output files were created and have content
+    # Save results to directory using the helper function
+    save_results_to_directory(result, test_dir)
+
+    # Check if output files were created
     protoblocks_file = os.path.join(test_dir, "protoblocks_output.geojson")
     assert os.path.exists(protoblocks_file)
-    protoblocks_gdf = gpd.read_file(protoblocks_file)
-    assert not protoblocks_gdf.empty
-    assert protoblocks_gdf.crs.to_string() == "EPSG:4326"
-    assert len(protoblocks_gdf) > 0
-
+    
     sidewalks_file = os.path.join(test_dir, "sidewalks_output.geojson")
     assert os.path.exists(sidewalks_file)
+    
+    params_file = os.path.join(test_dir, "parameters.json")
+    assert os.path.exists(params_file)
     sidewalks_gdf = gpd.read_file(sidewalks_file)
     assert not sidewalks_gdf.empty
     assert sidewalks_gdf.crs.to_string() == "EPSG:4326"
@@ -112,53 +137,51 @@ def test_main_cli_with_ignore_existing_flag(setup_test_dir):
 
 
 @patch('headless_sidewalkreator.full_sidewalkreator_algorithm.fetch_street_network_for_bbox')
-def test_run_headless_with_params_and_no_mock_gdf(mock_fetch, setup_test_dir, osm_sample_gdf):
-    """Test run_headless with a parameters file and no mock gdf."""
+def test_sidewalkreator_with_params_and_mock_fetch(mock_fetch, setup_test_dir, test_polygon_gdf, osm_sample_gdf):
+    """Test sidewalkreator with parameters and mocked fetch."""
     test_dir = setup_test_dir
 
-    # Create a dummy parameters file
-    params = {"split_max_len": 50}
-    params_path = os.path.join(test_dir, "params.json")
-    with open(params_path, "w") as f:
-        json.dump(params, f)
-
-    # The output directory will be created by the function
-    output_dir = os.path.join(test_dir, "output")
-
-    input_polygon = os.path.join(
-        os.path.dirname(__file__), "extra_tests", "polygon01.geojson"
-    )
+    # Create custom parameters
+    params = {"split_max_len": 50, "buffer_dist": 3.0}
 
     # Mock the fetch function to return a deterministic gdf
     mock_fetch.return_value = osm_sample_gdf
 
-    run_headless(input_polygon, output_dir, parameters_path=params_path)
+    # Call the new API
+    result = sidewalkreator(
+        input_polygon_gdf=test_polygon_gdf,
+        parameters=params
+    )
 
+    # Verify parameters were applied
+    assert result['parameters']['split_max_len'] == 50
+    assert result['parameters']['buffer_dist'] == 3.0
+    
     mock_fetch.assert_called_once()
-    assert os.path.exists(output_dir)
+
+    # Save results and verify files
+    save_results_to_directory(result, test_dir)
+    assert os.path.exists(test_dir)
 
     # Check if output files were created and are not empty
-    protoblocks_file = os.path.join(output_dir, "protoblocks_output.geojson")
+    protoblocks_file = os.path.join(test_dir, "protoblocks_output.geojson")
     assert os.path.exists(protoblocks_file)
     protoblocks_gdf = gpd.read_file(protoblocks_file)
     assert not protoblocks_gdf.empty
 
-    sidewalks_file = os.path.join(output_dir, "sidewalks_output.geojson")
+    sidewalks_file = os.path.join(test_dir, "sidewalks_output.geojson")
     assert os.path.exists(sidewalks_file)
     sidewalks_gdf = gpd.read_file(sidewalks_file)
     assert not sidewalks_gdf.empty
 
-    crossings_file = os.path.join(output_dir, "crossings_output.geojson")
+    crossings_file = os.path.join(test_dir, "crossings_output.geojson")
     assert os.path.exists(crossings_file)
     crossings_gdf = gpd.read_file(crossings_file)
 
 
-def test_ignore_existing_parameter(setup_test_dir, osm_sample_gdf):
+def test_ignore_existing_parameter(setup_test_dir, test_polygon_gdf, osm_sample_gdf):
     """Test the ignore_existing parameter functionality."""
     test_dir = setup_test_dir
-    input_polygon = os.path.join(
-        os.path.dirname(__file__), "extra_tests", "polygon02.geojson"
-    )
 
     # Create OSM data with existing sidewalks
     osm_with_sidewalks = osm_sample_gdf.copy()
@@ -188,12 +211,25 @@ def test_ignore_existing_parameter(setup_test_dir, osm_sample_gdf):
     combined_gdf = gpd.pd.concat([osm_with_sidewalks, sidewalk_gdf], ignore_index=True)
 
     # Test with ignore_existing=False (default behavior)
-    output_dir_normal = os.path.join(test_dir, "normal")
-    run_headless(input_polygon, output_dir_normal, osm_gdf=combined_gdf, ignore_existing=False)
+    result_normal = sidewalkreator(
+        input_polygon_gdf=test_polygon_gdf,
+        osm_gdf=combined_gdf,
+        ignore_existing=False
+    )
 
     # Test with ignore_existing=True
+    result_ignore = sidewalkreator(
+        input_polygon_gdf=test_polygon_gdf,
+        osm_gdf=combined_gdf,
+        ignore_existing=True
+    )
+
+    # Save results to verify files are created
+    output_dir_normal = os.path.join(test_dir, "normal")
     output_dir_ignore = os.path.join(test_dir, "ignore_existing")
-    run_headless(input_polygon, output_dir_ignore, osm_gdf=combined_gdf, ignore_existing=True)
+    
+    save_results_to_directory(result_normal, output_dir_normal)
+    save_results_to_directory(result_ignore, output_dir_ignore)
 
     # Both runs should complete successfully
     assert os.path.exists(output_dir_normal)
