@@ -4,14 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sidewalkreator"
-version = "0.0.0"
-description = "Headless prototype of OSM Sidewalkreator - generate sidewalks from OSM data without QGIS GUI"
+version = "0.1.0"
+description = "Headless OSM Sidewalkreator - generate sidewalks from OSM data without QGIS GUI"
 readme = "README.md"
-authors = [ { name = "Kaue Vestena", email = "kaue@example.com" } ]
+authors = [ { name = "Kaue Vestena", email = "kauemv2@gmail.com" } ]
 license = { text = "MIT" }
 requires-python = ">=3.8"
-keywords = ["osm", "geopandas", "osmnx", "sidewalks", "gis"]
+keywords = ["osm", "geopandas", "osmnx", "sidewalks", "gis", "urban_mobility_studies", "vector data"]
 classifiers = [
+  "Development Status :: 4 - Beta",
   "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
@@ -19,15 +20,15 @@ classifiers = [
   "Topic :: Scientific/Engineering :: GIS",
 ]
 dependencies = [
-  "geopandas",
-  "osmnx",
-  "shapely",
-  "scipy",
-  "fiona",
-  "pyproj",
-  "rtree",
-  "pandas",
-  "networkx",
+  "geopandas>=0.13",
+  "osmnx>=1.4",
+  "shapely>=2.0",
+  "scipy>=1.10",
+  "fiona>=1.9",
+  "pyproj>=3.6",
+  "rtree>=1.0",
+  "pandas>=1.5",
+  "networkx>=3.0",
 ]
 
 [project.urls]
