@@ -1,11 +1,9 @@
 # sidewalkreator
 
-A lightweight prototype for generating sidewalks from OSM data.
+A lightweight tool for generating sidewalks from OSM data.
 
-This repository contains a headless (CLI / library) prototype and helper
-functions. The package has been reorganized into a Python package layout
-(`headless_sidewalkreator/`) and includes runtime and development
-requirements files.
+This repository contains a headless (CLI / library) version of the QGIS plugin
+OSM Sidewalkreator.
 
 ## API Overview
 
@@ -112,11 +110,8 @@ pip install --upgrade pip setuptools wheel
 2. Install all dependencies:
 
 ```bash
-# install runtime dependencies
-pip install -r requirements-runtime.txt
-
-# install development/test dependencies
-pip install -r requirements-dev.txt
+# install in editable mode with development dependencies
+pip install -e .[dev]
 ```
 
 ### Alternative: Conda setup
@@ -130,8 +125,8 @@ conda activate hs-env
 # install via conda-forge for potentially faster geospatial package installation
 conda install -c conda-forge geopandas osmnx -y
 
-# install remaining dependencies
-pip install -r requirements-dev.txt
+# install remaining dependencies in editable mode
+pip install -e .[dev]
 ```
 
 ## Running tests
@@ -163,8 +158,6 @@ python -c "from headless_sidewalkreator import run_headless; print(run_headless.
 
 If you'd like, I can add a Makefile or small helper scripts to automate
 these steps.
-
-[REPO IN PROGRESS]
 
 This is the headless version of a QGIS Plugin called OSM Sidewalkreator, available at:
 
