@@ -1,0 +1,6 @@
+# Ignore all generated output files
+*
+
+# But keep the directory structure
+!.gitignore
+!README.md
