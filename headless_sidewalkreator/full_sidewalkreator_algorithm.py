@@ -62,6 +62,11 @@ def generate_protoblocks(
         "timeout": 60,
         "default_widths": params.default_widths,
         "fallback_default_width": params.fallback_default_width,
+        "crossing_inward_offset": params.crossing_inward_offset,
+        "crossing_extra_length": params.crossing_extra_length,
+        "crossing_ray_growth_factor": params.crossing_ray_growth_factor,
+        "crossing_max_ray_iterations": params.crossing_max_ray_iterations,
+        "crossing_node_precision": params.crossing_node_precision,
     }
     
     if parameters:
@@ -182,6 +187,11 @@ def sidewalkreator(
         "min_stretch_size": params.min_stretch_size,
         "abs_max_crossing_len": params.abs_max_crossing_len,
         "dead_end_removal_iterations": 1,  # Default to 1 iteration
+        "crossing_inward_offset": params.crossing_inward_offset,
+        "crossing_extra_length": params.crossing_extra_length,
+        "crossing_ray_growth_factor": params.crossing_ray_growth_factor,
+        "crossing_max_ray_iterations": params.crossing_max_ray_iterations,
+        "crossing_node_precision": params.crossing_node_precision,
     }
     
     if parameters:
@@ -316,11 +326,17 @@ def sidewalkreator(
         splitted_gdf,
         sidewalks_gdf,
         protoblocks_gdf,
+        curve_radius=run_params["default_curve_radius"],
+        inward_offset=run_params["crossing_inward_offset"],
+        extra_length=run_params["crossing_extra_length"],
         increment_inward=run_params["increment_inward"],
         max_crossings_iterations=run_params["max_crossings_iterations"],
         abs_max_crossing_len=run_params["abs_max_crossing_len"],
         perc_tol_crossings=run_params["perc_tol_crossings"],
         perc_draw_kerbs=run_params["perc_draw_kerbs"],
+        ray_growth_factor=run_params["crossing_ray_growth_factor"],
+        max_ray_iterations=run_params["crossing_max_ray_iterations"],
+        node_precision=run_params["crossing_node_precision"],
     )
     print("Step 13 complete.")
 

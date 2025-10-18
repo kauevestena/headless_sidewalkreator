@@ -6,7 +6,17 @@ transforming geospatial data using GeoPandas and other related libraries.
 """
 
 import geopandas as gpd
-from shapely.geometry import Polygon, MultiPolygon, LineString, MultiLineString
+from typing import Optional
+from shapely.geometry import (
+    GeometryCollection,
+    LineString,
+    MultiLineString,
+    MultiPoint,
+    MultiPolygon,
+    Point,
+    Polygon,
+)
+from shapely.prepared import prep
 
 
 def read_input_polygon(filepath: str) -> gpd.GeoDataFrame:
@@ -214,6 +224,25 @@ def polygonize_lines_gdf(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     polygons = list(polygonize(lines))
     print(f"Number of polygons found: {len(polygons)}")
 
+    if not polygons and lines:
+        merged = gpd.GeoSeries(lines, crs=gdf.crs).unary_union
+        if merged.is_empty:
+            polygons = []
+        else:
+            hull = merged.convex_hull
+            if hull.geom_type == "Polygon":
+                polygons = [hull]
+            elif hull.geom_type == "MultiPolygon":
+                polygons = list(hull.geoms)
+            else:
+                buffered = hull.buffer(0.1)
+                if not buffered.is_empty and buffered.geom_type == "Polygon":
+                    polygons = [buffered]
+                elif buffered.geom_type == "MultiPolygon":
+                    polygons = list(buffered.geoms)
+                else:
+                    polygons = []
+
     gdf_poly = gpd.GeoDataFrame(geometry=polygons)
     gdf_poly = gdf_poly.set_crs(gdf.crs)
     return gdf_poly
@@ -222,7 +251,7 @@ def polygonize_lines_gdf(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 import ast
 import pandas as pd
 
-from shapely.ops import split
+from shapely.ops import split, substring
 from shapely.geometry import MultiPoint, Point
 
 
@@ -258,13 +287,46 @@ def split_lines_at_intersections(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 
     # Split the lines
     new_lines = []
+    distance_tol = 1e-6
     for i, row in gdf.iterrows():
         line = row.geometry
-        points_on_line = [p for p in split_points if line.intersects(p)]
+        if line is None or line.is_empty:
+            continue
+
+        seen = set()
+        points_on_line = []
+        for p in split_points:
+            if line.distance(p) <= distance_tol:
+                proj = line.project(p)
+                aligned_point = line.interpolate(proj)
+                key = (round(aligned_point.x, 6), round(aligned_point.y, 6))
+                if key not in seen:
+                    seen.add(key)
+                    points_on_line.append(aligned_point)
+
         if points_on_line:
-            new_line_parts = split(line, MultiPoint(points_on_line))
-            for part in new_line_parts.geoms:
-                new_lines.append(part)
+            distances = [0.0, line.length]
+            for pt in points_on_line:
+                dist = line.project(pt)
+                if dist > distance_tol and (line.length - dist) > distance_tol:
+                    distances.append(dist)
+
+            # Deduplicate and sort distances
+            distances = sorted(set(round(d, 6) for d in distances))
+
+            segments = []
+            for start_d, end_d in zip(distances[:-1], distances[1:]):
+                if end_d - start_d <= distance_tol:
+                    continue
+                segment = substring(line, start_d, end_d)
+                if segment.is_empty or segment.length <= distance_tol:
+                    continue
+                segments.append(segment)
+
+            if segments:
+                new_lines.extend(segments)
+            else:
+                new_lines.append(line)
         else:
             new_lines.append(line)
 
@@ -650,508 +712,513 @@ def calculate_crossing_direction(point: Point, lines_df: gpd.GeoDataFrame) -> Po
     return Point(math.cos(angle), math.sin(angle))
 
 
+
+
 def draw_crossings_gdf(
     streets_gdf: gpd.GeoDataFrame,
-    sidewalks_gdf: gpd.GeoDataFrame = None,
-    protoblocks_gdf: gpd.GeoDataFrame = None,
+    sidewalks_gdf: Optional[gpd.GeoDataFrame] = None,
+    protoblocks_gdf: Optional[gpd.GeoDataFrame] = None,
+    *,
+    curve_radius: Optional[float] = None,
+    inward_offset: float = 1.0,
+    extra_length: float = 1.0,
     increment_inward: float = 0.5,
     max_crossings_iterations: int = 20,
-    abs_max_crossing_len: int = 100,
-    perc_tol_crossings: int = 25,
-    perc_draw_kerbs: int = 30,
+    abs_max_crossing_len: float = 100.0,
+    perc_tol_crossings: float = 25.0,
+    perc_draw_kerbs: float = 30.0,
+    ray_growth_factor: float = 2.0,
+    max_ray_iterations: int = 5,
+    node_precision: int = 6,
 ) -> gpd.GeoDataFrame:
-    """Generates crossings at the intersections using the ABCDE algorithm.
+    """Generate crossings following the documented Sidewalkreator procedure."""
 
-    This function implements the sophisticated crossing generation described in the
-    algorithm. Key insight: crossings are generated per road segment approaching
-    an intersection, not per intersection. Only road segments adjacent to full
-    protoblocks generate crossings.
+    from .parameters import default_curve_radius, fallback_default_width
 
-    The algorithm includes:
-    - ABCDE points system for accurate kerb positioning
-    - Iterative intersection finding with vector projection
-    - Adaptive center repositioning for optimal crossing geometry
-    - Quality control with length validation
-    - Protoblock adjacency validation for crossing placement
+    crs = streets_gdf.crs if streets_gdf is not None else None
 
-    Falls back to simpler crossing generation if ABCDE fails.
+    def _empty_result() -> gpd.GeoDataFrame:
+        return gpd.GeoDataFrame(geometry=[], crs=crs)
 
-    Args:
-        streets_gdf: A GeoDataFrame of street lines.
-        sidewalks_gdf: Optional GeoDataFrame of sidewalk lines for intersection testing.
-        protoblocks_gdf: Optional GeoDataFrame of protoblock polygons for adjacency checking.
-        increment_inward: Distance to move inward if crossing is too long.
-        max_crossings_iterations: Maximum attempts to find valid crossing.
-        abs_max_crossing_len: Absolute maximum crossing length.
-        perc_tol_crossings: Tolerance for crossing length validation.
-        perc_draw_kerbs: Percentage along crossing segments for kerb placement.
+    if streets_gdf is None or streets_gdf.empty:
+        return _empty_result()
 
-    Returns:
-        A new GeoDataFrame containing the generated crossing lines.
-    """
+    if sidewalks_gdf is None or sidewalks_gdf.empty:
+        return _empty_result()
 
-    # Find all intersection points where 2+ roads meet
-    intersections = streets_gdf.sindex.query(
-        streets_gdf.geometry, predicate="intersects"
-    )
+    sidewalks_union = sidewalks_gdf.geometry.unary_union
+    if sidewalks_union.is_empty:
+        return _empty_result()
 
-    # Group intersections by point and count roads at each intersection
-    intersection_points = {}
-    for i in range(len(intersections[0])):
-        idx1 = intersections[0][i]
-        idx2 = intersections[1][i]
-        if idx1 >= idx2:
+    sidewalks_prepared = prep(sidewalks_union)
+
+    # Keep protoblock argument for API completeness (not yet used for filtering).
+    _ = protoblocks_gdf
+
+    tolerance = max(3, int(node_precision))
+    kerb_fraction = max(0.0, min(perc_draw_kerbs / 100.0, 0.49))
+    base_curve_radius = default_curve_radius if curve_radius is None else curve_radius
+    ray_growth_factor_local = max(ray_growth_factor, 1.1)
+    max_ray_iterations_local = max(1, int(max_ray_iterations))
+    fallback_width = float(fallback_default_width)
+    distance_tol = 1e-6
+
+    def _resolve_width(row) -> float:
+        value = row.get("width", fallback_width)
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            value = fallback_width
+        if value <= 0:
+            value = fallback_width
+        return value
+
+    def _node_key(coord) -> tuple[float, float]:
+        return (round(coord[0], tolerance), round(coord[1], tolerance))
+
+    def _iter_lines(geom):
+        if geom is None or geom.is_empty:
+            return
+        if isinstance(geom, LineString):
+            yield geom
+        elif isinstance(geom, MultiLineString):
+            for part in geom.geoms:
+                if part and not part.is_empty:
+                    yield part
+
+    node_data: dict[tuple[float, float], dict] = {}
+    segment_info: dict[int, dict] = {}
+    segment_nodes: dict[int, dict] = {}
+
+    for idx, row in streets_gdf.iterrows():
+        geom = row.geometry
+        if geom is None or geom.is_empty:
             continue
 
-        line1 = streets_gdf.geometry.iloc[idx1]
-        line2 = streets_gdf.geometry.iloc[idx2]
-        intersection = line1.intersection(line2)
+        for line in _iter_lines(geom):
+            if line.length <= 0:
+                continue
+            width = _resolve_width(row)
+            coords = list(line.coords)
+            start = coords[0]
+            end = coords[-1]
+            segment_info[idx] = {
+                "geometry": line,
+                "width": width,
+                "start": start,
+                "end": end,
+            }
+            segment_nodes[idx] = {}
 
-        if intersection.geom_type == "Point":
-            point_key = (round(intersection.x, 6), round(intersection.y, 6))
-            if point_key not in intersection_points:
-                intersection_points[point_key] = {"point": intersection, "roads": []}
-            intersection_points[point_key]["roads"].extend([idx1, idx2])
-        elif intersection.geom_type == "MultiPoint":
-            for pt in intersection.geoms:
-                point_key = (round(pt.x, 6), round(pt.y, 6))
-                if point_key not in intersection_points:
-                    intersection_points[point_key] = {"point": pt, "roads": []}
-                intersection_points[point_key]["roads"].extend([idx1, idx2])
+            for coord, dist in ((start, 0.0), (end, line.length)):
+                key = _node_key(coord)
+                entry = node_data.setdefault(
+                    key, {"point": Point(coord), "segments": set(), "widths": []}
+                )
+                entry["segments"].add(idx)
+                entry["widths"].append(width)
+                segment_nodes[idx][(key, round(dist, 6))] = {
+                    "node_key": key,
+                    "distance": dist,
+                }
 
-    # Filter to intersections with 2+ roads (allowing for grid patterns where intersections have exactly 2 roads)
-    valid_intersections = {
-        k: v for k, v in intersection_points.items() if len(set(v["roads"])) >= 2
-    }
+    if not segment_info:
+        return _empty_result()
 
-    crossing_lines = []
+    # Augment node data with interior intersections (handles unsplit segments)
+    segment_series = gpd.GeoSeries(
+        {idx: info["geometry"] for idx, info in segment_info.items()}, crs=crs
+    )
+    sindex = segment_series.sindex
+    pairs = sindex.query(segment_series, predicate="intersects")
 
-    # New approach: Generate crossings based on road segments and boundary analysis
-    # If protoblocks are available, use them for protoblock-based logic
-    # Otherwise, use a boundary-aware approach to match the mathematical formula
+    def _iterate_points(geom):
+        if geom.is_empty:
+            return
+        if isinstance(geom, Point):
+            yield geom
+        elif geom.geom_type == "MultiPoint":
+            for pt in geom.geoms:
+                yield pt
+        elif geom.geom_type in {"LineString", "LinearRing"}:
+            for coord in geom.coords:
+                yield Point(coord)
+        elif geom.geom_type == "MultiLineString":
+            for part in geom.geoms:
+                for coord in part.coords:
+                    yield Point(coord)
+        elif geom.geom_type in {"Polygon", "MultiPolygon"}:
+            boundary = geom.boundary
+            if boundary.geom_type == "MultiLineString":
+                for part in boundary.geoms:
+                    for coord in part.coords:
+                        yield Point(coord)
+            else:
+                for coord in boundary.coords:
+                    yield Point(coord)
 
-    if protoblocks_gdf is not None and not protoblocks_gdf.empty:
-        # Protoblock-based approach: Generate crossings per road segment adjacent to protoblocks
-        for point_data in valid_intersections.values():
-            intersection_point = point_data["point"]
-            road_indices = list(set(point_data["roads"]))
+    for idx1, idx2 in zip(*pairs):
+        if idx1 >= idx2:
+            continue
+        line1 = segment_series.loc[idx1]
+        line2 = segment_series.loc[idx2]
+        try:
+            inter = line1.intersection(line2)
+        except Exception:
+            continue
 
-            # For each road segment at this intersection, check if it should have a crossing
-            for road_idx in road_indices:
-                road_geom = streets_gdf.geometry.iloc[road_idx]
+        for pt in _iterate_points(inter):
+            if pt.is_empty:
+                continue
+            proj1 = line1.project(pt)
+            proj2 = line2.project(pt)
+            aligned1 = line1.interpolate(proj1)
+            aligned2 = line2.interpolate(proj2)
+            key = _node_key((aligned1.x, aligned1.y))
+            entry = node_data.setdefault(
+                key, {"point": aligned1, "segments": set(), "widths": []}
+            )
+            entry["segments"].update([idx1, idx2])
+            entry["widths"].append(segment_info[idx1]["width"])
+            entry["widths"].append(segment_info[idx2]["width"])
 
-                # Check if this road segment is adjacent to any protoblock
-                # Create a small buffer around the road segment to check adjacency
-                road_buffer = road_geom.buffer(0.1)  # Small buffer for adjacency check
+            segment_nodes[idx1][(key, round(proj1, 6))] = {
+                "node_key": key,
+                "distance": proj1,
+            }
+            segment_nodes[idx2][(key, round(proj2, 6))] = {
+                "node_key": key,
+                "distance": proj2,
+            }
 
-                # Check if the road buffer intersects with any protoblock
-                has_adjacent_protoblock = False
-                for protoblock_geom in protoblocks_gdf.geometry:
-                    if road_buffer.intersects(protoblock_geom):
-                        has_adjacent_protoblock = True
-                        break
+    for entry in node_data.values():
+        entry["degree"] = len(entry["segments"])
+        entry["major_width"] = max(entry["widths"]) if entry["widths"] else fallback_width
 
-                # Only generate crossing if road segment has adjacent protoblock
-                if not has_adjacent_protoblock:
-                    continue
-
-                # Find another road at this intersection to pair with for crossing generation
-                other_road_idx = None
-                for other_idx in road_indices:
-                    if other_idx != road_idx:
-                        other_road_idx = other_idx
-                        break
-
-                if other_road_idx is None:
-                    continue
-
-                road1 = road_geom
-                road2 = streets_gdf.geometry.iloc[other_road_idx]
-
-                # Try to generate crossing using ABCDE algorithm
-                try:
-                    crossing = generate_crossing_abcde(
-                        intersection_point,
-                        road1,
-                        road2,
-                        streets_gdf.iloc[road_idx],
-                        sidewalks_gdf,
-                        increment_inward,
-                        max_crossings_iterations,
-                        abs_max_crossing_len,
-                        perc_tol_crossings,
-                        perc_draw_kerbs,
-                    )
-
-                    if crossing is not None:
-                        crossing_lines.append(crossing)
-                except Exception:
-                    # ABCDE failed, will use fallback
-                    pass
-    else:
-        # Boundary-aware approach: Use mathematical formula logic
-        # Generate crossings per intersection but exclude boundary effects
-
-        # Determine the grid bounds to identify boundary vs interior intersections
-        all_coords = []
-        for point_data in valid_intersections.values():
-            pt = point_data["point"]
-            all_coords.append((pt.x, pt.y))
-
-        if all_coords:
-            min_x = min(coord[0] for coord in all_coords)
-            max_x = max(coord[0] for coord in all_coords)
-            min_y = min(coord[1] for coord in all_coords)
-            max_y = max(coord[1] for coord in all_coords)
-
-            # For each intersection, determine if it should generate crossings
-            for point_data in valid_intersections.values():
-                intersection_point = point_data["point"]
-                road_indices = list(set(point_data["roads"]))
-
-                if len(road_indices) >= 2:
-                    # Check if this is a boundary intersection
-                    is_boundary = (
-                        abs(intersection_point.x - min_x) < 1e-6  # Left boundary
-                        or abs(intersection_point.x - max_x) < 1e-6  # Right boundary
-                        or abs(intersection_point.y - min_y) < 1e-6  # Bottom boundary
-                        or abs(intersection_point.y - max_y) < 1e-6  # Top boundary
-                    )
-
-                    # For boundary intersections, skip some crossing generation to match formula
-                    # This is a simplified heuristic - skip corner intersections
-                    is_corner = (
-                        (
-                            abs(intersection_point.x - min_x) < 1e-6
-                            and abs(intersection_point.y - min_y) < 1e-6
-                        )
-                        or (
-                            abs(intersection_point.x - min_x) < 1e-6
-                            and abs(intersection_point.y - max_y) < 1e-6
-                        )
-                        or (
-                            abs(intersection_point.x - max_x) < 1e-6
-                            and abs(intersection_point.y - min_y) < 1e-6
-                        )
-                        or (
-                            abs(intersection_point.x - max_x) < 1e-6
-                            and abs(intersection_point.y - max_y) < 1e-6
-                        )
-                    )
-
-                    # Skip one corner intersection to match the formula (9 -> 8)
-                    # Skip the bottom-right corner (max_x, min_y)
-                    if (
-                        is_corner
-                        and abs(intersection_point.x - max_x) < 1e-6
-                        and abs(intersection_point.y - min_y) < 1e-6
-                    ):
-                        continue
-
-                    road1_idx = road_indices[0]
-                    road2_idx = road_indices[1]
-
-                    road1 = streets_gdf.geometry.iloc[road1_idx]
-                    road2 = streets_gdf.geometry.iloc[road2_idx]
-
-                    # Try to generate crossing using ABCDE algorithm
-                    try:
-                        crossing = generate_crossing_abcde(
-                            intersection_point,
-                            road1,
-                            road2,
-                            streets_gdf.iloc[road1_idx],
-                            sidewalks_gdf,
-                            increment_inward,
-                            max_crossings_iterations,
-                            abs_max_crossing_len,
-                            perc_tol_crossings,
-                            perc_draw_kerbs,
-                        )
-
-                        if crossing is not None:
-                            crossing_lines.append(crossing)
-                    except Exception:
-                        # ABCDE failed, will use fallback
-                        pass
-
-    # If ABCDE didn't generate any crossings, fall back to simple crossing generation
-    if not crossing_lines:
-        # Apply the same boundary-aware logic to the fallback
-        if protoblocks_gdf is None or protoblocks_gdf.empty:
-            # Use boundary-aware fallback
-            all_coords = []
-            for point_data in valid_intersections.values():
-                pt = point_data["point"]
-                all_coords.append((pt.x, pt.y))
-
-            if all_coords:
-                min_x = min(coord[0] for coord in all_coords)
-                max_x = max(coord[0] for coord in all_coords)
-                min_y = min(coord[1] for coord in all_coords)
-                max_y = max(coord[1] for coord in all_coords)
-
-                for point_data in valid_intersections.values():
-                    intersection_point = point_data["point"]
-                    road_indices = list(set(point_data["roads"]))
-
-                    if len(road_indices) >= 2:
-                        # Apply the same boundary logic
-                        is_corner = (
-                            (
-                                abs(intersection_point.x - min_x) < 1e-6
-                                and abs(intersection_point.y - min_y) < 1e-6
-                            )
-                            or (
-                                abs(intersection_point.x - min_x) < 1e-6
-                                and abs(intersection_point.y - max_y) < 1e-6
-                            )
-                            or (
-                                abs(intersection_point.x - max_x) < 1e-6
-                                and abs(intersection_point.y - min_y) < 1e-6
-                            )
-                            or (
-                                abs(intersection_point.x - max_x) < 1e-6
-                                and abs(intersection_point.y - max_y) < 1e-6
-                            )
-                        )
-
-                        # Skip one corner intersection to match the formula (9 -> 8)
-                        # Skip the bottom-right corner (max_x, min_y)
-                        if (
-                            is_corner
-                            and abs(intersection_point.x - max_x) < 1e-6
-                            and abs(intersection_point.y - min_y) < 1e-6
-                        ):
-                            continue
-
-                        # Try a simplified crossing generation
-                        direction = calculate_crossing_direction(
-                            intersection_point, streets_gdf.iloc[road_indices]
-                        )
-                        if direction:
-                            crossing_length = 10.0  # Default crossing length
-                            line = LineString(
-                                [
-                                    (
-                                        intersection_point.x
-                                        - direction.x * crossing_length / 2,
-                                        intersection_point.y
-                                        - direction.y * crossing_length / 2,
-                                    ),
-                                    (
-                                        intersection_point.x
-                                        + direction.x * crossing_length / 2,
-                                        intersection_point.y
-                                        + direction.y * crossing_length / 2,
-                                    ),
-                                ]
-                            )
-                            crossing_lines.append(line)
+    def _interpolate_along(
+        line: LineString, base_distance: float, direction: int, distance: float
+    ) -> Optional[Point]:
+        if line.length == 0:
+            return None
+        distance = max(distance, 0.0)
+        if direction > 0:
+            target = min(base_distance + distance, line.length)
         else:
-            # Original fallback for when protoblocks are available
-            for point_data in intersection_points.values():
-                intersection_point = point_data["point"]
-                road_indices = list(set(point_data["roads"]))
+            target = max(base_distance - distance, 0.0)
+        try:
+            return line.interpolate(target)
+        except Exception:
+            return None
 
-                if len(road_indices) >= 2:
-                    # Try a simplified crossing generation
-                    direction = calculate_crossing_direction(
-                        intersection_point, streets_gdf.iloc[road_indices]
-                    )
-                    if direction:
-                        crossing_length = 10.0  # Default crossing length
-                        line = LineString(
-                            [
-                                (
-                                    intersection_point.x
-                                    - direction.x * crossing_length / 2,
-                                    intersection_point.y
-                                    - direction.y * crossing_length / 2,
-                                ),
-                                (
-                                    intersection_point.x
-                                    + direction.x * crossing_length / 2,
-                                    intersection_point.y
-                                    + direction.y * crossing_length / 2,
-                                ),
-                            ]
-                        )
-                        crossing_lines.append(line)
+    def _tangent_direction(line: LineString, at_dist: float) -> Optional[tuple[float, float]]:
+        if line.length == 0:
+            return None
+        span = max(min(line.length * 0.05, 1.0), 1e-3)
+        d0 = max(at_dist - span, 0.0)
+        d1 = min(at_dist + span, line.length)
+        p0 = line.interpolate(d0)
+        p1 = line.interpolate(d1)
+        vec = (p1.x - p0.x, p1.y - p0.y)
+        norm = math.hypot(*vec)
+        if norm == 0:
+            return None
+        return (vec[0] / norm, vec[1] / norm)
 
-    if not crossing_lines:
-        return gpd.GeoDataFrame(geometry=[], crs=streets_gdf.crs)
+    def _perpendicular(vec: tuple[float, float]) -> tuple[float, float]:
+        return (-vec[1], vec[0])
 
-    crossings_gdf = gpd.GeoDataFrame(geometry=crossing_lines, crs=streets_gdf.crs)
-    return crossings_gdf
+    def _extract_hit(geom, origin: Point, tol: float = 1e-3) -> Optional[Point]:
+        if geom.is_empty:
+            return None
 
+        if isinstance(geom, Point):
+            return geom if geom.distance(origin) > tol else None
 
-def generate_crossing_abcde(
-    intersection_point,
-    road1,
-    road2,
-    road1_row,
-    sidewalks_gdf,
-    increment_inward,
-    max_iterations,
-    max_length,
-    tolerance_percent,
-    kerb_percent,
-):
-    """Generate a crossing using the ABCDE points system.
+        if geom.geom_type == "MultiPoint":
+            pts = [pt for pt in geom.geoms if pt.distance(origin) > tol]
+            if not pts:
+                return None
+            return min(pts, key=lambda p: p.distance(origin))
 
-    Args:
-        intersection_point: The intersection point (Point C)
-        road1, road2: The two intersecting road geometries
-        road1_row: The row data for road1 (contains width info)
-        sidewalks_gdf: Optional sidewalk geometries for intersection testing
-        increment_inward: Distance to move inward if crossing is too long
-        max_iterations: Maximum attempts to find valid crossing
-        max_length: Absolute maximum crossing length
-        tolerance_percent: Tolerance for crossing length validation
-        kerb_percent: Percentage along crossing segments for kerb placement
+        if geom.geom_type in {"LineString", "LinearRing"}:
+            candidate = nearest_points(origin, geom)[1]
+            if candidate.distance(origin) > tol:
+                return candidate
+            pts = [Point(c) for c in geom.coords if Point(c).distance(origin) > tol]
+            if not pts:
+                return None
+            return min(pts, key=lambda p: p.distance(origin))
 
-    Returns:
-        LineString crossing geometry or None if no valid crossing found
-    """
-    import math
+        if geom.geom_type == "MultiLineString":
+            candidates = [
+                hit
+                for part in geom.geoms
+                if (hit := _extract_hit(part, origin, tol)) is not None
+            ]
+            if not candidates:
+                return None
+            return min(candidates, key=lambda p: p.distance(origin))
 
-    # Calculate expected street width for validation
-    expected_width = road1_row.get("width", 6.0)
+        if geom.geom_type == "GeometryCollection":
+            candidates = [
+                hit
+                for part in geom.geoms
+                if (hit := _extract_hit(part, origin, tol)) is not None
+            ]
+            if not candidates:
+                return None
+            return min(candidates, key=lambda p: p.distance(origin))
 
-    # If no sidewalks are provided, be more lenient with crossing length validation
-    if sidewalks_gdf is None or len(sidewalks_gdf) == 0:
-        expected_width = max(
-            expected_width, 15.0
-        )  # Allow longer crossings without sidewalks
+        if geom.geom_type == "Polygon":
+            return _extract_hit(geom.boundary, origin, tol)
 
-    # Calculate crossing direction (perpendicular to road1)
-    road1_coords = list(road1.coords)
+        if geom.geom_type == "MultiPolygon":
+            candidates = [
+                hit
+                for part in geom.geoms
+                if (hit := _extract_hit(part.boundary, origin, tol)) is not None
+            ]
+            if not candidates:
+                return None
+            return min(candidates, key=lambda p: p.distance(origin))
 
-    # Find the segment of road1 that contains the intersection point
-    crossing_direction = None
-    for i in range(len(road1_coords) - 1):
-        p1 = Point(road1_coords[i])
-        p2 = Point(road1_coords[i + 1])
-        segment = LineString([road1_coords[i], road1_coords[i + 1]])
-
-        if segment.distance(intersection_point) < 0.1:  # Close enough to be on segment
-            # Calculate perpendicular direction
-            dx = p2.x - p1.x
-            dy = p2.y - p1.y
-            # Perpendicular vector (rotate 90 degrees)
-            perp_dx = -dy
-            perp_dy = dx
-            # Normalize
-            length = math.sqrt(perp_dx**2 + perp_dy**2)
-            if length > 0:
-                crossing_direction = (perp_dx / length, perp_dy / length)
-                break
-
-    if crossing_direction is None:
         return None
 
-    # Start with point C at the intersection
-    point_c = intersection_point
-
-    for iteration in range(max_iterations):
-        # Try to find intersections with sidewalks or create crossing
-        coef_side_a = 1.0
-        coef_side_b = 1.0
-
-        # Iterative search for intersection points A and E
-        for search_iteration in range(10):  # Sub-iterations for intersection finding
-            # Project vectors from C to find potential A and E points
-            search_distance = expected_width * max(coef_side_a, coef_side_b)
-
-            # Point A (side I)
-            point_a_x = (
-                point_c.x + crossing_direction[0] * search_distance * coef_side_a
+    def _cast_ray(origin: Point, direction: tuple[float, float], base_len: float) -> Optional[Point]:
+        length = max(base_len, 0.5)
+        for _ in range(max_ray_iterations_local):
+            target = Point(
+                origin.x + direction[0] * length,
+                origin.y + direction[1] * length,
             )
-            point_a_y = (
-                point_c.y + crossing_direction[1] * search_distance * coef_side_a
-            )
-            point_a = Point(point_a_x, point_a_y)
+            ray = LineString([origin, target])
+            if not sidewalks_prepared.intersects(ray):
+                length *= ray_growth_factor_local
+                continue
+            hit = sidewalks_union.intersection(ray)
+            candidate = _extract_hit(hit, origin)
+            if candidate is not None:
+                return candidate
+            length *= ray_growth_factor_local
+        return None
 
-            # Point E (side II)
-            point_e_x = (
-                point_c.x - crossing_direction[0] * search_distance * coef_side_b
-            )
-            point_e_y = (
-                point_c.y - crossing_direction[1] * search_distance * coef_side_b
-            )
-            point_e = Point(point_e_x, point_e_y)
+    def _build_crossing_record(
+        point_a: Point,
+        point_e: Point,
+        base_length: float,
+        max_allowed: float,
+        segment_id: int,
+        node_degree: int,
+        center_offset: float,
+        *,
+        fallback: bool = False,
+    ) -> dict:
+        midpoint = Point(
+            (point_a.x + point_e.x) / 2.0,
+            (point_a.y + point_e.y) / 2.0,
+        )
 
-            # Calculate crossing length
-            crossing_length = point_a.distance(point_e)
+        ac_line = LineString([point_a, midpoint])
+        ec_line = LineString([point_e, midpoint])
+        if ac_line.length == 0 or ec_line.length == 0:
+            return {}
 
-            # Validate crossing length against expected width + tolerance
-            max_expected = expected_width * (1 + tolerance_percent / 100)
+        point_b = ac_line.interpolate(ac_line.length * kerb_fraction)
+        point_d = ec_line.interpolate(ec_line.length * kerb_fraction)
 
-            if crossing_length <= max_expected and crossing_length <= max_length:
-                # Valid crossing found - calculate B and D points for kerbs
-                crossing_line = LineString([point_a, point_e])
+        crossing_line = LineString(
+            [
+                (point_a.x, point_a.y),
+                (point_b.x, point_b.y),
+                (midpoint.x, midpoint.y),
+                (point_d.x, point_d.y),
+                (point_e.x, point_e.y),
+            ]
+        )
 
-                # Point B: kerb_percent along A->C
-                ac_line = LineString([point_a, point_c])
-                point_b = ac_line.interpolate(ac_line.length * kerb_percent / 100)
+        crossing_length = point_a.distance(point_e)
 
-                # Point D: kerb_percent along E->C
-                ec_line = LineString([point_e, point_c])
-                point_d = ec_line.interpolate(ec_line.length * kerb_percent / 100)
+        return {
+            "geometry": crossing_line,
+            "length_m": crossing_length,
+            "length_ok": crossing_length <= max_allowed,
+            "above_tolerance": crossing_length > base_length,
+            "segment_id": segment_id,
+            "node_degree": node_degree,
+            "center_offset_m": center_offset,
+            "used_fallback": fallback,
+        }
 
-                # Return the full crossing line A-B-C-D-E
-                return LineString([point_a, point_b, point_c, point_d, point_e])
+    records = []
 
-            elif crossing_length > max_expected:
-                # Too long - double the search coefficients
-                coef_side_a *= 2
-                coef_side_b *= 2
-            else:
-                # Found intersections but need to adjust
-                break
+    for idx, info in segment_info.items():
+        line = info["geometry"]
+        segment_width = info["width"]
+        base_length = segment_width + extra_length
+        if base_length <= 0 or line is None or line.length <= distance_tol:
+            continue
 
-        # If no valid crossing found, move point C inward and try again
-        # Move along road1 toward the center
-        if iteration < max_iterations - 1:
-            # Calculate inward direction along road1
-            road1_coords = list(road1.coords)
-            closest_segment_idx = None
-            min_distance = float("inf")
+        node_entries = list(segment_nodes.get(idx, {}).values())
+        if not node_entries:
+            continue
 
-            for i in range(len(road1_coords) - 1):
-                segment = LineString([road1_coords[i], road1_coords[i + 1]])
-                distance = segment.distance(point_c)
-                if distance < min_distance:
-                    min_distance = distance
-                    closest_segment_idx = i
+        processed_dirs = set()
 
-            if closest_segment_idx is not None:
-                # Move inward along the road segment
-                p1 = Point(road1_coords[closest_segment_idx])
-                p2 = Point(road1_coords[closest_segment_idx + 1])
+        for node_entry in node_entries:
+            node = node_data.get(node_entry["node_key"])
+            if not node or node["degree"] <= 2:
+                continue
 
-                # Direction from intersection toward road interior
-                if p1.distance(intersection_point) < p2.distance(intersection_point):
-                    inward_direction = ((p2.x - p1.x), (p2.y - p1.y))
-                else:
-                    inward_direction = ((p1.x - p2.x), (p1.y - p2.y))
+            line_length = line.length
+            if line_length <= 0:
+                continue
 
-                # Normalize and scale by increment_inward
-                length = math.sqrt(inward_direction[0] ** 2 + inward_direction[1] ** 2)
-                if length > 0:
-                    inward_direction = (
-                        inward_direction[0] / length,
-                        inward_direction[1] / length,
+            major_width = node["major_width"]
+            initial_inward = 0.5 * major_width + base_curve_radius + inward_offset
+            base_distance = node_entry["distance"]
+            available_forward = line_length - base_distance
+            available_backward = base_distance
+            max_allowed = base_length * (1 + perc_tol_crossings / 100.0)
+
+            for direction in (1, -1):
+                available = available_forward if direction > 0 else available_backward
+                if available <= distance_tol:
+                    continue
+
+                dir_key = (node_entry["node_key"], direction)
+                if dir_key in processed_dirs:
+                    continue
+
+                max_inward = min(max(0.0, line_length * 0.49), available * 0.99)
+                current_inward = min(initial_inward, max_inward)
+                if current_inward <= 0:
+                    current_inward = min(available * 0.5, max_inward)
+                if current_inward <= distance_tol:
+                    continue
+
+                attempt = 0
+                record_added = False
+                last_center = None
+                last_perp = None
+
+                while attempt < max_crossings_iterations:
+                    center = _interpolate_along(
+                        line, base_distance, direction, current_inward
                     )
-                    point_c = Point(
-                        point_c.x + inward_direction[0] * increment_inward,
-                        point_c.y + inward_direction[1] * increment_inward,
+                    if center is None:
+                        break
+
+                    distance_along = line.project(center)
+                    tangent = _tangent_direction(line, distance_along)
+                    if tangent is None:
+                        break
+                    perp = _perpendicular(tangent)
+                    last_center = center
+                    last_perp = perp
+
+                    point_a = _cast_ray(center, perp, base_length)
+                    point_e = _cast_ray(center, (-perp[0], -perp[1]), base_length)
+
+                    if point_a is None or point_e is None:
+                        attempt += 1
+                        if current_inward < max_inward:
+                            current_inward = min(
+                                current_inward + increment_inward, max_inward
+                            )
+                            continue
+
+                        if base_length <= abs_max_crossing_len:
+                            half = base_length / 2.0
+                            fallback_a = Point(
+                                center.x + perp[0] * half,
+                                center.y + perp[1] * half,
+                            )
+                            fallback_e = Point(
+                                center.x - perp[0] * half,
+                                center.y - perp[1] * half,
+                            )
+                            record = _build_crossing_record(
+                                fallback_a,
+                                fallback_e,
+                                base_length,
+                                max_allowed,
+                                idx,
+                                node["degree"],
+                                current_inward,
+                                fallback=True,
+                            )
+                            if record:
+                                records.append(record)
+                                record_added = True
+                        break
+
+                    crossing_length = point_a.distance(point_e)
+                    if crossing_length <= 0 or crossing_length > abs_max_crossing_len:
+                        attempt += 1
+                        if current_inward < max_inward:
+                            current_inward = min(
+                                current_inward + increment_inward, max_inward
+                            )
+                            continue
+                        break
+
+                    if crossing_length <= max_allowed:
+                        record = _build_crossing_record(
+                            point_a,
+                            point_e,
+                            base_length,
+                            max_allowed,
+                            idx,
+                            node["degree"],
+                            current_inward,
+                        )
+                        if record:
+                            records.append(record)
+                            record_added = True
+                        break
+
+                    attempt += 1
+                    if current_inward >= max_inward:
+                        break
+
+                    current_inward = min(
+                        current_inward + increment_inward, max_inward
                     )
 
-    # No valid crossing found after all iterations
-    return None
+                if (
+                    not record_added
+                    and last_center is not None
+                    and last_perp is not None
+                    and base_length <= abs_max_crossing_len
+                ):
+                    half = base_length / 2.0
+                    fallback_a = Point(
+                        last_center.x + last_perp[0] * half,
+                        last_center.y + last_perp[1] * half,
+                    )
+                    fallback_e = Point(
+                        last_center.x - last_perp[0] * half,
+                        last_center.y - last_perp[1] * half,
+                    )
+                    record = _build_crossing_record(
+                        fallback_a,
+                        fallback_e,
+                        base_length,
+                        max_allowed,
+                        idx,
+                        node["degree"],
+                        current_inward,
+                        fallback=True,
+                    )
+                    if record:
+                        records.append(record)
 
+                processed_dirs.add(dir_key)
+
+    if not records:
+        return _empty_result()
+
+    return gpd.GeoDataFrame(records, geometry="geometry", crs=crs)
 
 from scipy.spatial import Voronoi
 

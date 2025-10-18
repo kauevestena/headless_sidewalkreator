@@ -315,6 +315,49 @@ def test_draw_crossings_gdf_no_crossings():
     assert crossings_gdf.empty
 
 
+def test_draw_crossings_gdf_basic_crossings():
+    """Crossing generation matches simple perpendicular intersection layout."""
+    streets = [
+        LineString([(-10, 0), (0, 0)]),
+        LineString([(0, 0), (10, 0)]),
+        LineString([(0, -10), (0, 0)]),
+        LineString([(0, 0), (0, 10)]),
+    ]
+    widths = [8, 8, 8, 8]
+    streets_gdf = gpd.GeoDataFrame({"width": widths}, geometry=streets, crs="EPSG:3857")
+
+    sidewalks = [
+        LineString([(-12, 4), (12, 4)]),
+        LineString([(-12, -4), (12, -4)]),
+        LineString([(4, -12), (4, 12)]),
+        LineString([(-4, -12), (-4, 12)]),
+    ]
+    sidewalks_gdf = gpd.GeoDataFrame(geometry=sidewalks, crs="EPSG:3857")
+
+    crossings_gdf = draw_crossings_gdf(
+        streets_gdf,
+        sidewalks_gdf,
+        curve_radius=0.0,
+        inward_offset=0.0,
+        extra_length=0.0,
+        increment_inward=0.5,
+        max_crossings_iterations=5,
+        abs_max_crossing_len=30,
+        perc_tol_crossings=10,
+        perc_draw_kerbs=25,
+        ray_growth_factor=1.5,
+        max_ray_iterations=3,
+        node_precision=6,
+    )
+
+    assert len(crossings_gdf) == 4
+    assert all(len(list(geom.coords)) == 5 for geom in crossings_gdf.geometry)
+    for length in crossings_gdf["length_m"]:
+        assert length == pytest.approx(8.0, rel=1e-3)
+    assert crossings_gdf["length_ok"].all()
+    assert not crossings_gdf["above_tolerance"].any()
+
+
 def test_generate_kerbs_gdf():
     """Test generate_kerbs_gdf."""
     crossings = [LineString([(0, 0), (2, 2)]), LineString([(1, 1), (3, 3)])]

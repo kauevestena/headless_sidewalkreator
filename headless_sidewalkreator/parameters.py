@@ -49,6 +49,21 @@ d_to_add_interp_d = 2
 # percent of middle-crossing segment to draw Kerbs
 perc_draw_kerbs = 30
 
+# crossing inward offset (meters) applied after width/curve_radius heuristic
+crossing_inward_offset = 1.0
+
+# extra distance added to the initial crossing length (meters)
+crossing_extra_length = 1.0
+
+# multiplicative factor for ray growth when searching sidewalks
+crossing_ray_growth_factor = 2.0
+
+# maximum ray growth attempts per side when casting crossings
+crossing_max_ray_iterations = 5
+
+# decimal precision used when clustering street endpoints into nodes
+crossing_node_precision = 6
+
 # percent of tolerance to drive a point innerly in segment
 perc_tol_crossings = 25
 

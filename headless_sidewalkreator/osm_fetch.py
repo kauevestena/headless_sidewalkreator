@@ -35,11 +35,11 @@ def _normalize_bbox(
         A tuple representing the bounding box as (west, south, east, north) for OSMnx.
     """
     minx, miny, maxx, maxy = bbox
-    west = minx
+    north = maxy
     south = miny
     east = maxx
-    north = maxy
-    return west, south, east, north
+    west = minx
+    return north, south, east, west
 
 
 def osm_query_string_by_bbox(
@@ -57,7 +57,7 @@ def osm_query_string_by_bbox(
     Returns:
         Overpass QL query string (text).
     """
-    west, south, east, north = _normalize_bbox(bbox)
+    north, south, east, west = _normalize_bbox(bbox)
     if tags is None:
         tags = {
             "highway": True,
@@ -100,7 +100,7 @@ def get_osm_data(
     Returns:
         GeoDataFrame with OSM features (may be empty on failures).
     """
-    west, south, east, north = _normalize_bbox(bbox)
+    north, south, east, west = _normalize_bbox(bbox)
     if tags is None:
         tags = {
             "highway": True,
