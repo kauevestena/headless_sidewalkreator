@@ -205,7 +205,7 @@ def reproject_gdf(gdf: gpd.GeoDataFrame, target_crs: str) -> gpd.GeoDataFrame:
     return gdf.to_crs(target_crs)
 
 
-from shapely.ops import polygonize
+from shapely.ops import polygonize, polygonize_full
 
 
 def polygonize_lines_gdf(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
@@ -221,27 +221,56 @@ def polygonize_lines_gdf(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """
     lines = [geom for geom in gdf.geometry]
     print(f"Number of lines to polygonize: {len(lines)}")
+
+    # First attempt: direct polygonize from the input lines
     polygons = list(polygonize(lines))
     print(f"Number of polygons found: {len(polygons)}")
 
+    # If no polygons found, try more robust strategies without creating a
+    # convex hull fallback that would mask real block structure.
     if not polygons and lines:
-        merged = gpd.GeoSeries(lines, crs=gdf.crs).unary_union
-        if merged.is_empty:
+        # Try to close tiny gaps by snapping coordinates to a grid. This is a
+        # deterministic, low-risk operation that helps polygonize find closed
+        # rings when endpoints are nearly identical but have tiny floating
+        # differences. Round to 6 decimal places which is sufficient for our
+        # test fixtures and typical projected coordinates.
+        from shapely.geometry import LineString
+
+        snapped_lines = []
+        for ln in lines:
+            if ln is None or ln.is_empty:
+                continue
+            if ln.geom_type == "LineString":
+                snapped_coords = [(round(c[0], 6), round(c[1], 6)) for c in ln.coords]
+                snapped_lines.append(LineString(snapped_coords))
+            elif ln.geom_type == "MultiLineString":
+                for part in ln.geoms:
+                    snapped_coords = [
+                        (round(c[0], 6), round(c[1], 6)) for c in part.coords
+                    ]
+                    snapped_lines.append(LineString(snapped_coords))
+
+        # Attempt polygonize on snapped lines
+        try:
+            polygons = list(polygonize(snapped_lines))
+        except Exception:
             polygons = []
-        else:
-            hull = merged.convex_hull
-            if hull.geom_type == "Polygon":
-                polygons = [hull]
-            elif hull.geom_type == "MultiPolygon":
-                polygons = list(hull.geoms)
-            else:
-                buffered = hull.buffer(0.1)
-                if not buffered.is_empty and buffered.geom_type == "Polygon":
-                    polygons = [buffered]
-                elif buffered.geom_type == "MultiPolygon":
-                    polygons = list(buffered.geoms)
-                else:
-                    polygons = []
+
+        if not polygons:
+            merged = gpd.GeoSeries(snapped_lines, crs=gdf.crs).unary_union
+            # Try polygonize on the merged geometry (may close gaps)
+            try:
+                polygons = list(polygonize(merged))
+            except Exception:
+                polygons = []
+
+        if not polygons:
+            # Use polygonize_full to get polygons even when dangles/cuts exist
+            try:
+                polys, dangles, cuts, invalids = polygonize_full(merged)
+                polygons = list(polys)
+            except Exception:
+                polygons = []
 
     gdf_poly = gpd.GeoDataFrame(geometry=polygons)
     gdf_poly = gdf_poly.set_crs(gdf.crs)
@@ -724,8 +753,6 @@ def calculate_crossing_direction(point: Point, lines_df: gpd.GeoDataFrame) -> Po
     return Point(math.cos(angle), math.sin(angle))
 
 
-
-
 def draw_crossings_gdf(
     streets_gdf: gpd.GeoDataFrame,
     sidewalks_gdf: Optional[gpd.GeoDataFrame] = None,
@@ -905,7 +932,9 @@ def draw_crossings_gdf(
 
     for entry in node_data.values():
         entry["degree"] = len(entry["segments"])
-        entry["major_width"] = max(entry["widths"]) if entry["widths"] else fallback_width
+        entry["major_width"] = (
+            max(entry["widths"]) if entry["widths"] else fallback_width
+        )
 
     def _interpolate_along(
         line: LineString, base_distance: float, direction: int, distance: float
@@ -922,7 +951,9 @@ def draw_crossings_gdf(
         except Exception:
             return None
 
-    def _tangent_direction(line: LineString, at_dist: float) -> Optional[tuple[float, float]]:
+    def _tangent_direction(
+        line: LineString, at_dist: float
+    ) -> Optional[tuple[float, float]]:
         if line.length == 0:
             return None
         span = max(min(line.length * 0.05, 1.0), 1e-3)
@@ -996,7 +1027,9 @@ def draw_crossings_gdf(
 
         return None
 
-    def _cast_ray(origin: Point, direction: tuple[float, float], base_len: float) -> Optional[Point]:
+    def _cast_ray(
+        origin: Point, direction: tuple[float, float], base_len: float
+    ) -> Optional[Point]:
         length = max(base_len, 0.5)
         for _ in range(max_ray_iterations_local):
             target = Point(
@@ -1193,9 +1226,7 @@ def draw_crossings_gdf(
                     if current_inward >= max_inward:
                         break
 
-                    current_inward = min(
-                        current_inward + increment_inward, max_inward
-                    )
+                    current_inward = min(current_inward + increment_inward, max_inward)
 
                 if (
                     not record_added
@@ -1231,6 +1262,7 @@ def draw_crossings_gdf(
         return _empty_result()
 
     return gpd.GeoDataFrame(records, geometry="geometry", crs=crs)
+
 
 from scipy.spatial import Voronoi
 
@@ -1980,3 +2012,20 @@ def data_clean_gdf(
     print(f"Number of features after filtering: {len(gdf)}")
 
     return gdf, existing_sidewalks, existing_crossings
+
+
+def save_debug_layer(
+    gdf: gpd.GeoDataFrame, layer_name: str, output_dir: str = "debug_layers"
+):
+    """Saves a GeoDataFrame as a debug layer in the specified output directory.
+
+    Args:
+        gdf: The GeoDataFrame to save.
+        layer_name: The name of the layer (used for the filename).
+        output_dir: The directory to save the debug layer in.
+    """
+    import os
+
+    os.makedirs(output_dir, exist_ok=True)
+    layer_path = os.path.join(output_dir, f"{layer_name}.geojson")
+    gdf.to_file(layer_path, driver="GeoJSON")

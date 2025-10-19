@@ -36,12 +36,12 @@ def generate_protoblocks(
     parameters: dict = None,
 ) -> gpd.GeoDataFrame:
     """Generate protoblocks from input area and OSM data.
-    
+
     This function generates protoblocks (enclosed areas formed by road networks)
     independently of the full sidewalk generation process. Protoblocks are created
     by fetching street data, cleaning it, splitting at intersections, and polygonizing
     the resulting line network.
-    
+
     Args:
         input_polygon_gdf: GeoDataFrame containing the input polygon geometry.
         place_name: A string to be geocoded to a polygon boundary for the area of interest.
@@ -51,12 +51,12 @@ def generate_protoblocks(
         osm_gdf: Optional GeoDataFrame with OSM data to be used instead of fetching.
                 If None, OSM data will be fetched automatically for the input polygon's bbox.
         parameters: Optional dictionary with runtime parameters to override defaults.
-    
+
     Returns:
         GeoDataFrame containing the protoblocks (polygon geometries).
     """
     print("--- generate_protoblocks called ---")
-    
+
     # Consolidate parameters
     run_params = {
         "timeout": 60,
@@ -68,16 +68,18 @@ def generate_protoblocks(
         "crossing_max_ray_iterations": params.crossing_max_ray_iterations,
         "crossing_node_precision": params.crossing_node_precision,
     }
-    
+
     if parameters:
         run_params.update(parameters)
 
     # 1. Determine input area from either place_name, input_polygon_gdf, or bbox
     input_sources = [place_name, input_polygon_gdf, bbox]
     provided_sources = [src for src in input_sources if src is not None]
-    
+
     if len(provided_sources) != 1:
-        raise ValueError("Provide exactly one of 'place_name', 'input_polygon_gdf', or 'bbox'.")
+        raise ValueError(
+            "Provide exactly one of 'place_name', 'input_polygon_gdf', or 'bbox'."
+        )
 
     if place_name:
         # Geocode the place name to a GeoDataFrame
@@ -91,7 +93,9 @@ def generate_protoblocks(
         print(f"Converting bbox to GeoDataFrame: {bbox}")
         input_gdf = bbox_to_gdf(bbox)
     else:
-        raise ValueError("Either 'place_name', 'input_polygon_gdf', or 'bbox' must be provided.")
+        raise ValueError(
+            "Either 'place_name', 'input_polygon_gdf', or 'bbox' must be provided."
+        )
 
     # 2. Get bounding box
     bbox = get_bbox_from_gdf(input_gdf)
@@ -168,7 +172,7 @@ def sidewalkreator(
         - 'input_area': The input area geometry used (for compatibility)
         - 'parameters': Runtime parameters that were used
     """
-    
+
     # Consolidate parameters
     run_params = {
         "timeout": 60,
@@ -193,16 +197,18 @@ def sidewalkreator(
         "crossing_max_ray_iterations": params.crossing_max_ray_iterations,
         "crossing_node_precision": params.crossing_node_precision,
     }
-    
+
     if parameters:
         run_params.update(parameters)
 
     # 1. Determine input area from either place_name, input_polygon_gdf, or bbox
     input_sources = [place_name, input_polygon_gdf, bbox]
     provided_sources = [src for src in input_sources if src is not None]
-    
+
     if len(provided_sources) != 1:
-        raise ValueError("Provide exactly one of 'place_name', 'input_polygon_gdf', or 'bbox'.")
+        raise ValueError(
+            "Provide exactly one of 'place_name', 'input_polygon_gdf', or 'bbox'."
+        )
 
     if place_name:
         # Geocode the place name to a GeoDataFrame
@@ -216,7 +222,9 @@ def sidewalkreator(
         print(f"Converting bbox to GeoDataFrame: {bbox}")
         input_gdf = bbox_to_gdf(bbox)
     else:
-        raise ValueError("Either 'place_name', 'input_polygon_gdf', or 'bbox' must be provided.")
+        raise ValueError(
+            "Either 'place_name', 'input_polygon_gdf', or 'bbox' must be provided."
+        )
 
     # 2. Get bounding box
     bbox = get_bbox_from_gdf(input_gdf)
@@ -248,15 +256,24 @@ def sidewalkreator(
     splitted_gdf = split_lines_at_intersections(lines_gdf)
     print("Step 7 complete.")
 
-    # 8. Create protoblocks from polygonizing
-    protoblocks_gdf = polygonize_lines_gdf(splitted_gdf)
+    # 8. Create protoblocks using the standalone generation logic
+    # Use the same implementation as the detached protoblocks generator so
+    # behavior is identical between the example and the full pipeline.
+    protoblocks_gdf = generate_protoblocks(
+        input_polygon_gdf=input_gdf,
+        osm_gdf=osm_gdf,
+        parameters=parameters,
+    )
     print("Step 8 complete.")
+
+    # Store the original protoblocks for output (before filtering/dissolving)
+    original_protoblocks_gdf = protoblocks_gdf.copy()
 
     # 9. Extract POI data (buildings, addresses, other POIs)
     buildings_gdf = cleaned_gdf[
         (cleaned_gdf["building"].notna()) & (cleaned_gdf["building"] != "")
     ].copy()
-    
+
     # Extract address nodes
     if "addr:housenumber" in clipped_reproj_gdf.columns:
         addresses_gdf = clipped_reproj_gdf[
@@ -264,12 +281,12 @@ def sidewalkreator(
         ].copy()
     else:
         addresses_gdf = gpd.GeoDataFrame(geometry=[], crs=clipped_reproj_gdf.crs)
-    
+
     # Extract other POIs (amenities and shops)
     other_pois_gdf = clipped_reproj_gdf[
         clipped_reproj_gdf["amenity"].notna() | clipped_reproj_gdf["shop"].notna()
     ].copy()
-    
+
     # Create unified POI layer for sidewalk splitting
     poi_layers = []
     if not buildings_gdf.empty:
@@ -280,7 +297,7 @@ def sidewalkreator(
         poi_layers.append(addresses_gdf)
     if not other_pois_gdf.empty:
         poi_layers.append(other_pois_gdf)
-    
+
     if poi_layers:
         unified_pois_gdf = gpd.pd.concat(poi_layers, ignore_index=True)
     else:
@@ -312,8 +329,10 @@ def sidewalkreator(
         )
     print("Step 11 complete.")
 
-    # 12. Filter and buffer protoblocks
-    protoblocks_gdf = filter_and_buffer_protoblocks_gdf(
+    # 12. Filter and buffer protoblocks (for internal processing)
+    # Note: This creates a dissolved/buffered version for crossing generation,
+    # but we keep the original protoblocks for the output
+    filtered_protoblocks_gdf = filter_and_buffer_protoblocks_gdf(
         protoblocks_gdf,
         sidewalks_gdf,
         cutoff_percent=run_params["cutoff_percent_protoblock"],
@@ -322,10 +341,11 @@ def sidewalkreator(
     print("Step 12 complete.")
 
     # 13. Draw crossings using ABCDE algorithm
+    # Use the filtered/dissolved protoblocks for crossing generation
     crossings_gdf = draw_crossings_gdf(
         splitted_gdf,
         sidewalks_gdf,
-        protoblocks_gdf,
+        filtered_protoblocks_gdf,  # Use filtered version here
         curve_radius=run_params["default_curve_radius"],
         inward_offset=run_params["crossing_inward_offset"],
         extra_length=run_params["crossing_extra_length"],
@@ -347,7 +367,7 @@ def sidewalkreator(
     splitted_sidewalks_gdf = split_sidewalks_gdf(
         sidewalks_gdf,
         intersection_points_gdf,
-        protoblocks_gdf,
+        original_protoblocks_gdf,  # Use original protoblocks for splitting
         unified_pois_gdf,  # Now using the actual POI layer
         max_length=run_params["split_max_len"],
         num_segments=run_params["split_num_segments"],
@@ -360,16 +380,17 @@ def sidewalkreator(
     print("Step 15 complete.")
 
     # Return all results as GeoDataFrames
+    # Use original_protoblocks_gdf so users get the individual blocks, not dissolved
     result = {
-        'sidewalks': splitted_sidewalks_gdf,
-        'crossings': crossings_gdf,
-        'kerbs': kerbs_gdf,
-        'protoblocks': protoblocks_gdf,
-        'intersection_points': intersection_points_gdf,
-        'pois': unified_pois_gdf,  # Add POI data to output
-        'input_area': input_gdf,  # Add input area for legacy file-based function
-        'parameters': run_params,
+        "sidewalks": splitted_sidewalks_gdf,
+        "crossings": crossings_gdf,
+        "kerbs": kerbs_gdf,
+        "protoblocks": original_protoblocks_gdf,  # Return original protoblocks
+        "intersection_points": intersection_points_gdf,
+        "pois": unified_pois_gdf,  # Add POI data to output
+        "input_area": input_gdf,  # Add input area for legacy file-based function
+        "parameters": run_params,
     }
-    
+
     print("Process complete. Returning GeoDataFrames.")
     return result
