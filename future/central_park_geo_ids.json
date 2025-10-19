@@ -1,0 +1,44 @@
+{
+  "anchor": {
+    "lon": -73.9699496745064,
+    "lat": 40.77335132459706,
+    "inradius_m": 1006.2570851007632
+  },
+  "scale_m": 2614.1858491846006,
+  "s2": {
+    "level": 14,
+    "approx_edge_m": 562.744140625,
+    "approx_diag_m": 795.8403958178673,
+    "token": null,
+    "id": null,
+    "due_to": {
+      "scale_level": 14,
+      "eps_level_max": 20
+    }
+  },
+  "wm": {
+    "z": 15,
+    "x": 9651,
+    "y": 12312,
+    "tile_width_m": 925.135732235006,
+    "due_to": {
+      "scale_z": 15,
+      "eps_z_max": 21
+    }
+  },
+  "stats": {
+    "iterations": 4227,
+    "bbox_width_m": 2012.8432332544216,
+    "bbox_height_m": 4036.436187092002
+  },
+  "params": {
+    "eps_m": 8.0,
+    "alpha_s2": 0.6,
+    "beta_wm": 0.6,
+    "polylabel_precision_m": 1.0
+  },
+  "notes": {
+    "s2_token_requires_s2sphere": true,
+    "wm_lat_clamped": false
+  }
+}
