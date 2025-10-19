@@ -18,6 +18,11 @@ from shapely.geometry import (
 )
 from shapely.prepared import prep
 
+from .logging_config import get_logger
+
+
+logger = get_logger(__name__)
+
 
 def read_input_polygon(filepath: str) -> gpd.GeoDataFrame:
     """Reads an input polygon from a file and returns a GeoDataFrame.
@@ -220,11 +225,11 @@ def polygonize_lines_gdf(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         A new GeoDataFrame containing the polygonized geometries.
     """
     lines = [geom for geom in gdf.geometry]
-    print(f"Number of lines to polygonize: {len(lines)}")
+    logger.info("Number of lines to polygonize: %s", len(lines))
 
     # First attempt: direct polygonize from the input lines
     polygons = list(polygonize(lines))
-    print(f"Number of polygons found: {len(polygons)}")
+    logger.info("Number of polygons found: %s", len(polygons))
 
     # If no polygons found, try more robust strategies without creating a
     # convex hull fallback that would mask real block structure.
@@ -300,7 +305,7 @@ def split_lines_at_intersections(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     intersections = gdf.sindex.query(gdf.geometry, predicate="intersects")
 
     split_points = []
-    print(f"Number of intersections found: {len(intersections[0])}")
+    logger.info("Number of intersections found: %s", len(intersections[0]))
     for i in range(len(intersections[0])):
         idx1 = intersections[0][i]
         idx2 = intersections[1][i]
@@ -2003,13 +2008,13 @@ def data_clean_gdf(
             (gdf["highway"] == "footway") & (gdf["footway"] == "crossing")
         ].copy()
 
-    print(f"Number of features before filtering: {len(gdf)}")
+    logger.info("Number of features before filtering: %s", len(gdf))
 
     # Remove features with width < 0.5
     gdf["width"] = gdf["highway"].map(widths)
     gdf = gdf[gdf["width"] >= 0.5].copy()
 
-    print(f"Number of features after filtering: {len(gdf)}")
+    logger.info("Number of features after filtering: %s", len(gdf))
 
     return gdf, existing_sidewalks, existing_crossings
 

@@ -3,8 +3,8 @@
 This module exposes the sidewalkreator function - the modern GeoDataFrame-based API.
 """
 
-import os
 import json
+import os
 import geopandas as gpd
 import osmnx as ox
 from .generic_functions import (
@@ -26,6 +26,10 @@ from .generic_functions import (
     generate_kerbs_gdf,
 )
 from . import parameters as params
+from .logging_config import get_logger
+
+
+logger = get_logger(__name__)
 
 
 def generate_protoblocks(
@@ -55,7 +59,7 @@ def generate_protoblocks(
     Returns:
         GeoDataFrame containing the protoblocks (polygon geometries).
     """
-    print("--- generate_protoblocks called ---")
+    logger.info("generate_protoblocks called")
 
     # Consolidate parameters
     run_params = {
@@ -83,14 +87,14 @@ def generate_protoblocks(
 
     if place_name:
         # Geocode the place name to a GeoDataFrame
-        print(f"Geocoding place_name: '{place_name}'")
+        logger.info("Geocoding place_name '%s'", place_name)
         input_gdf = ox.geocode_to_gdf(place_name)
     elif input_polygon_gdf is not None:
         # Use the provided GeoDataFrame
         input_gdf = input_polygon_gdf.copy()
     elif bbox is not None:
         # Convert bounding box to GeoDataFrame
-        print(f"Converting bbox to GeoDataFrame: {bbox}")
+        logger.info("Converting bbox %s to GeoDataFrame", bbox)
         input_gdf = bbox_to_gdf(bbox)
     else:
         raise ValueError(
@@ -103,16 +107,16 @@ def generate_protoblocks(
     # 3. Fetch OSM Data (allow injection via `osm_gdf`)
     if osm_gdf is None:
         osm_gdf = fetch_street_network_for_bbox(bbox, timeout=run_params["timeout"])
-    print("Step 3 complete.")
+    logger.info("Step 3 complete")
 
     # 4. Clip data
     clipped_gdf = clip_gdf(osm_gdf, input_gdf)
-    print("Step 4 complete.")
+    logger.info("Step 4 complete")
 
     # 5. Reproject to a local TM
     utm_crs = input_gdf.estimate_utm_crs()
     clipped_reproj_gdf = reproject_gdf(clipped_gdf, utm_crs)
-    print("Step 5 complete.")
+    logger.info("Step 5 complete")
 
     # 6. Clean data
     cleaned_gdf, existing_sidewalks, existing_crossings = data_clean_gdf(
@@ -120,18 +124,17 @@ def generate_protoblocks(
         run_params["default_widths"],
         run_params["fallback_default_width"],
     )
-    print("Step 6 complete.")
+    logger.info("Step 6 complete")
 
     # 7. Split lines at intersections
     lines_gdf = cleaned_gdf[cleaned_gdf.geometry.type == "LineString"].copy()
     splitted_gdf = split_lines_at_intersections(lines_gdf)
-    print("Step 7 complete.")
+    logger.info("Step 7 complete")
 
     # 8. Create protoblocks from polygonizing
     protoblocks_gdf = polygonize_lines_gdf(splitted_gdf)
-    print("Step 8 complete.")
-
-    print("Protoblocks generation complete.")
+    logger.info("Step 8 complete")
+    logger.info("Protoblocks generation complete")
     return protoblocks_gdf
 
 
@@ -143,7 +146,7 @@ def sidewalkreator(
     parameters: dict = None,
     ignore_existing: bool = False,
 ) -> dict:
-    print("--- sidewalkreator called ---")
+    logger.info("sidewalkreator called")
     """Generate sidewalks from input polygon and OSM data, returning GeoDataFrames.
     
     This is the main API function that accepts and returns GeoDataFrames instead of files,
@@ -212,14 +215,14 @@ def sidewalkreator(
 
     if place_name:
         # Geocode the place name to a GeoDataFrame
-        print(f"Geocoding place_name: '{place_name}'")
+        logger.info("Geocoding place_name '%s'", place_name)
         input_gdf = ox.geocode_to_gdf(place_name)
     elif input_polygon_gdf is not None:
         # Use the provided GeoDataFrame
         input_gdf = input_polygon_gdf.copy()
     elif bbox is not None:
         # Convert bounding box to GeoDataFrame
-        print(f"Converting bbox to GeoDataFrame: {bbox}")
+        logger.info("Converting bbox %s to GeoDataFrame", bbox)
         input_gdf = bbox_to_gdf(bbox)
     else:
         raise ValueError(
@@ -232,16 +235,16 @@ def sidewalkreator(
     # 3. Fetch OSM Data (allow injection via `osm_gdf`)
     if osm_gdf is None:
         osm_gdf = fetch_street_network_for_bbox(bbox, timeout=run_params["timeout"])
-    print("Step 3 complete.")
+    logger.info("Step 3 complete")
 
     # 4. Clip data
     clipped_gdf = clip_gdf(osm_gdf, input_gdf)
-    print("Step 4 complete.")
+    logger.info("Step 4 complete")
 
     # 5. Reproject to a local TM
     utm_crs = input_gdf.estimate_utm_crs()
     clipped_reproj_gdf = reproject_gdf(clipped_gdf, utm_crs)
-    print("Step 5 complete.")
+    logger.info("Step 5 complete")
 
     # 6. Clean data
     cleaned_gdf, existing_sidewalks, existing_crossings = data_clean_gdf(
@@ -249,12 +252,12 @@ def sidewalkreator(
         run_params["default_widths"],
         run_params["fallback_default_width"],
     )
-    print("Step 6 complete.")
+    logger.info("Step 6 complete")
 
     # 7. Split lines at intersections
     lines_gdf = cleaned_gdf[cleaned_gdf.geometry.type == "LineString"].copy()
     splitted_gdf = split_lines_at_intersections(lines_gdf)
-    print("Step 7 complete.")
+    logger.info("Step 7 complete")
 
     # 8. Create protoblocks using the standalone generation logic
     # Use the same implementation as the detached protoblocks generator so
@@ -264,7 +267,7 @@ def sidewalkreator(
         osm_gdf=osm_gdf,
         parameters=parameters,
     )
-    print("Step 8 complete.")
+    logger.info("Step 8 complete")
 
     # Store the original protoblocks for output (before filtering/dissolving)
     original_protoblocks_gdf = protoblocks_gdf.copy()
@@ -302,7 +305,7 @@ def sidewalkreator(
         unified_pois_gdf = gpd.pd.concat(poi_layers, ignore_index=True)
     else:
         unified_pois_gdf = gpd.GeoDataFrame(geometry=[], crs=clipped_reproj_gdf.crs)
-    print("Step 9 complete.")
+    logger.info("Step 9 complete")
 
     # 10. Draw sidewalks
     streets_gdf = cleaned_gdf[
@@ -317,7 +320,7 @@ def sidewalkreator(
         curve_radius=run_params["default_curve_radius"],
         min_d_to_building=run_params["min_d_to_building"],
     )
-    print("Step 10 complete.")
+    logger.info("Step 10 complete")
 
     # Handle sidewalk tags
     sidewalks_gdf = handle_sidewalk_tags(sidewalks_gdf, cleaned_gdf)
@@ -327,7 +330,7 @@ def sidewalkreator(
         sidewalks_gdf = remove_lines_from_no_block_gdf(
             sidewalks_gdf, iterations=run_params["dead_end_removal_iterations"]
         )
-    print("Step 11 complete.")
+    logger.info("Step 11 complete")
 
     # 12. Filter and buffer protoblocks (for internal processing)
     # Note: This creates a dissolved/buffered version for crossing generation,
@@ -338,7 +341,7 @@ def sidewalkreator(
         cutoff_percent=run_params["cutoff_percent_protoblock"],
         ignore_existing=ignore_existing,
     )
-    print("Step 12 complete.")
+    logger.info("Step 12 complete")
 
     # 13. Draw crossings using ABCDE algorithm
     # Use the filtered/dissolved protoblocks for crossing generation
@@ -358,7 +361,7 @@ def sidewalkreator(
         max_ray_iterations=run_params["crossing_max_ray_iterations"],
         node_precision=run_params["crossing_node_precision"],
     )
-    print("Step 13 complete.")
+    logger.info("Step 13 complete")
 
     # 14. Split sidewalks (now with POI integration)
     intersection_points_gdf = gpd.GeoDataFrame(
@@ -373,11 +376,11 @@ def sidewalkreator(
         num_segments=run_params["split_num_segments"],
         min_stretch_size=run_params["min_stretch_size"],
     )
-    print("Step 14 complete.")
+    logger.info("Step 14 complete")
 
     # 15. Generate kerbs
     kerbs_gdf = generate_kerbs_gdf(crossings_gdf)
-    print("Step 15 complete.")
+    logger.info("Step 15 complete")
 
     # Return all results as GeoDataFrames
     # Use original_protoblocks_gdf so users get the individual blocks, not dissolved
@@ -392,5 +395,5 @@ def sidewalkreator(
         "parameters": run_params,
     }
 
-    print("Process complete. Returning GeoDataFrames.")
+    logger.info("Process complete. Returning GeoDataFrames")
     return result

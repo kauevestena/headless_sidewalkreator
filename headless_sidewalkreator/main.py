@@ -3,11 +3,16 @@
 This module provides the command-line interface using the modern GeoDataFrame-based API.
 """
 
-import os
 import json
+import os
 import geopandas as gpd
+
 from .full_sidewalkreator_algorithm import sidewalkreator
 from .generic_functions import read_input_polygon
+from .logging_config import get_logger
+
+
+logger = get_logger(__name__)
 
 
 def save_results_to_directory(result, output_directory):
@@ -90,7 +95,7 @@ def save_results_to_directory(result, output_directory):
     with open(params_output_path, "w") as f:
         json.dump(run_params, f, indent=4)
 
-    print(f"Process complete. Output saved to {output_directory}")
+    logger.info("Process complete. Output saved to %s", output_directory)
 
 
 def create_merged_output(output_directory, sidewalks_gdf, crossings_gdf, kerbs_gdf):
