@@ -597,6 +597,23 @@ def remove_lines_from_no_block_gdf(
     return _iterative_prune_edges_gdf(synthetic_edges_gdf, iterations)
 
 
+def _dissolve_and_buffer_protoblocks(
+    protoblocks_gdf: gpd.GeoDataFrame, buffer_distance: float = 0.1
+) -> gpd.GeoDataFrame:
+    """Helper function to dissolve and buffer protoblocks.
+
+    Args:
+        protoblocks_gdf: A GeoDataFrame of protoblock polygons.
+        buffer_distance: The buffer distance to apply.
+
+    Returns:
+        A GeoDataFrame containing the dissolved and buffered protoblocks.
+    """
+    dissolved = protoblocks_gdf.dissolve()
+    buffered = dissolved.buffer(buffer_distance)
+    return gpd.GeoDataFrame(geometry=buffered, crs=protoblocks_gdf.crs)
+
+
 def filter_and_buffer_protoblocks_gdf(
     protoblocks_gdf: gpd.GeoDataFrame,
     sidewalks_gdf: gpd.GeoDataFrame,
@@ -621,9 +638,7 @@ def filter_and_buffer_protoblocks_gdf(
         A GeoDataFrame containing the filtered and buffered protoblocks.
     """
     if ignore_existing or sidewalks_gdf.empty:
-        dissolved = protoblocks_gdf.dissolve()
-        buffered = dissolved.buffer(0.1)
-        return gpd.GeoDataFrame(geometry=buffered, crs=protoblocks_gdf.crs)
+        return _dissolve_and_buffer_protoblocks(protoblocks_gdf)
 
     # Calculate sidewalk area and store it in a new column
     sidewalks_with_area_gdf = sidewalks_gdf.copy()
@@ -654,10 +669,7 @@ def filter_and_buffer_protoblocks_gdf(
     filtered_protoblocks = protoblocks_gdf[protoblocks_gdf["ratio"] <= cutoff_percent]
 
     # Dissolve and buffer
-    dissolved_protoblocks = filtered_protoblocks.dissolve()
-    buffered_protoblocks = dissolved_protoblocks.buffer(0.1)
-
-    return gpd.GeoDataFrame(geometry=buffered_protoblocks, crs=protoblocks_gdf.crs)
+    return _dissolve_and_buffer_protoblocks(filtered_protoblocks)
 
 
 import math
