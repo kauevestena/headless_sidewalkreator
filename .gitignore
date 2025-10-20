@@ -172,3 +172,4 @@ test/__pycache__/
 # OSMNX cache
 cache/
 .vscode/settings.json
+debug_layers/

@@ -24,6 +24,7 @@ from .generic_functions import (
     draw_crossings_gdf,
     split_sidewalks_gdf,
     generate_kerbs_gdf,
+    save_debug_layer,
 )
 from . import parameters as params
 from .logging_config import get_logger
@@ -131,6 +132,8 @@ def generate_protoblocks(
     splitted_gdf = split_lines_at_intersections(lines_gdf)
     logger.info("Step 7 complete")
 
+    # save_debug_layer(splitted_gdf, "protoblocks_splitted_lines")
+
     # 8. Create protoblocks from polygonizing
     protoblocks_gdf = polygonize_lines_gdf(splitted_gdf)
     logger.info("Step 8 complete")
@@ -148,10 +151,10 @@ def sidewalkreator(
 ) -> dict:
     logger.info("sidewalkreator called")
     """Generate sidewalks from input polygon and OSM data, returning GeoDataFrames.
-    
+
     This is the main API function that accepts and returns GeoDataFrames instead of files,
     making the library more flexible by letting users handle I/O.
-    
+
     Args:
         input_polygon_gdf: GeoDataFrame containing the input polygon geometry.
         place_name: A string to be geocoded to a polygon boundary for the area of interest.
@@ -163,11 +166,11 @@ def sidewalkreator(
         parameters: Optional dictionary with runtime parameters to override defaults.
         ignore_existing: If True, ignores existing sidewalks and generates all
             possible sidewalks without filtering based on pre-existing coverage.
-    
+
     Returns:
         Dictionary containing output GeoDataFrames with keys:
         - 'sidewalks': Main sidewalk line geometries
-        - 'crossings': Crossing line geometries  
+        - 'crossings': Crossing line geometries
         - 'kerbs': Kerb point geometries
         - 'protoblocks': Intermediate protoblocks (for debugging)
         - 'intersection_points': Intersection points used in processing
@@ -259,15 +262,22 @@ def sidewalkreator(
     splitted_gdf = split_lines_at_intersections(lines_gdf)
     logger.info("Step 7 complete")
 
-    # 8. Create protoblocks using the standalone generation logic
-    # Use the same implementation as the detached protoblocks generator so
-    # behavior is identical between the example and the full pipeline.
-    protoblocks_gdf = generate_protoblocks(
-        input_polygon_gdf=input_gdf,
-        osm_gdf=osm_gdf,
-        parameters=parameters,
-    )
+    save_debug_layer(splitted_gdf, "sidewalkreator_splitted_lines")
+
+    # # # # 8. Create protoblocks using the standalone generation logic
+    # # # # Use the same implementation as the detached protoblocks generator so
+    # # # # behavior is identical between the example and the full pipeline.
+    # # # protoblocks_gdf = generate_protoblocks(
+    # # #     input_polygon_gdf=input_gdf,
+    # # #     osm_gdf=osm_gdf,
+    # # #     parameters=parameters,
+    # # # )
+    # generate protoblocks with "polygonize_lines_gdf", since there's no meaning in downloading everything twice
+    protoblocks_gdf = polygonize_lines_gdf(splitted_gdf)
+
     logger.info("Step 8 complete")
+
+    # save_debug_layer(protoblocks_gdf, "sidewalkreator_protoblocks")
 
     # Store the original protoblocks for output (before filtering/dissolving)
     original_protoblocks_gdf = protoblocks_gdf.copy()
