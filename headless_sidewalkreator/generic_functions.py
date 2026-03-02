@@ -553,8 +553,7 @@ def remove_lines_from_no_block_gdf(
         degree-1 nodes iteratively for `iterations` passes.
         """
         edges = []
-        for _, row in edges_gdf.iterrows():
-            line = row.geometry
+        for line in edges_gdf.geometry.values:
             if line is None:
                 continue
             try:
@@ -610,8 +609,7 @@ def remove_lines_from_no_block_gdf(
     # Manual fallback: build mapping of edges to endpoints and remove edges
     # that touch a degree-1 node. Repeat for the requested number of iterations.
     edges = []
-    for _, row in gdf.iterrows():
-        line = row.geometry
+    for line in gdf.geometry.values:
         if line is None:
             continue
         try:
