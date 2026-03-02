@@ -322,8 +322,7 @@ def split_lines_at_intersections(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     # Split the lines
     new_lines = []
     distance_tol = 1e-6
-    for i, row in gdf.iterrows():
-        line = row.geometry
+    for line in gdf.geometry:
         if line is None or line.is_empty:
             continue
 
@@ -430,10 +429,7 @@ def adjust_buffer_for_buildings(
             return default_buffer
 
         # Calculate distance to nearest building
-        min_distance = float("inf")
-        for _, building in possible_matches.iterrows():
-            distance = line.distance(building.geometry)
-            min_distance = min(min_distance, distance)
+        min_distance = possible_matches.distance(line).min()
 
         # If a sidewalk would overlap a building, reduce width
         # Sidewalk width = (road_width / 2) + buffer
@@ -484,16 +480,16 @@ def handle_sidewalk_tags(
 
     # Handle sidewalk=no
     no_sidewalk_streets = streets_gdf[streets_gdf["sidewalk"] == "no"].copy()
-    for _, street in no_sidewalk_streets.iterrows():
-        road_width = street.get("width", 6.0)
+    for street in no_sidewalk_streets.itertuples():
+        road_width = getattr(street, "width", 6.0)
         buffer_distance = (road_width / 2) + 1.0
         exclusion_geometries.append(street.geometry.buffer(buffer_distance))
 
     # Handle sidewalk=left/right
     for side in ["left", "right"]:
         side_streets = streets_gdf[streets_gdf["sidewalk"] == side].copy()
-        for _, street in side_streets.iterrows():
-            road_width = street.get("width", 6.0)
+        for street in side_streets.itertuples():
+            road_width = getattr(street, "width", 6.0)
             buffer_distance = road_width / 2
             offset_line = street.geometry.parallel_offset(
                 buffer_distance, side, join_style=2
@@ -510,8 +506,8 @@ def handle_sidewalk_tags(
 
     # Handle sidewalk=yes/both (sure zones)
     sure_streets = streets_gdf[streets_gdf["sidewalk"].isin(["yes", "both"])].copy()
-    for _, street in sure_streets.iterrows():
-        road_width = street.get("width", 6.0)
+    for street in sure_streets.itertuples():
+        road_width = getattr(street, "width", 6.0)
         buffer_distance = (road_width / 2) + 1.0
         sure_geometries.append(street.geometry.buffer(buffer_distance))
 
@@ -553,8 +549,7 @@ def remove_lines_from_no_block_gdf(
         degree-1 nodes iteratively for `iterations` passes.
         """
         edges = []
-        for _, row in edges_gdf.iterrows():
-            line = row.geometry
+        for line in edges_gdf.geometry:
             if line is None:
                 continue
             try:
@@ -610,8 +605,7 @@ def remove_lines_from_no_block_gdf(
     # Manual fallback: build mapping of edges to endpoints and remove edges
     # that touch a degree-1 node. Repeat for the requested number of iterations.
     edges = []
-    for _, row in gdf.iterrows():
-        line = row.geometry
+    for line in gdf.geometry:
         if line is None:
             continue
         try:
@@ -727,8 +721,7 @@ def calculate_crossing_direction(point: Point, lines_df: gpd.GeoDataFrame) -> Po
         return None
 
     angles = []
-    for i, row in lines_df.iterrows():
-        line = row.geometry
+    for line in lines_df.geometry:
         coords = list(line.coords)
         for i in range(len(coords) - 1):
             p1 = coords[i]
@@ -834,7 +827,18 @@ def draw_crossings_gdf(
     segment_info: dict[int, dict] = {}
     segment_nodes: dict[int, dict] = {}
 
-    for idx, row in streets_gdf.iterrows():
+    def _resolve_width_namedtuple(row) -> float:
+        value = getattr(row, "width", fallback_width)
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            value = fallback_width
+        if value <= 0:
+            value = fallback_width
+        return value
+
+    for row in streets_gdf.itertuples():
+        idx = row.Index
         geom = row.geometry
         if geom is None or geom.is_empty:
             continue
@@ -842,7 +846,7 @@ def draw_crossings_gdf(
         for line in _iter_lines(geom):
             if line.length <= 0:
                 continue
-            width = _resolve_width(row)
+            width = _resolve_width_namedtuple(row)
             coords = list(line.coords)
             start = coords[0]
             end = coords[-1]
@@ -1330,9 +1334,7 @@ def split_sidewalks_by_voronoi(
 
     # Split the sidewalks by the Voronoi lines
     new_sidewalks = []
-    for i, row in sidewalks_gdf.iterrows():
-        sidewalk = row.geometry
-
+    for sidewalk in sidewalks_gdf.geometry:
         # Skip invalid or empty geometries
         if sidewalk is None or sidewalk.is_empty:
             continue
@@ -1412,8 +1414,7 @@ def split_sidewalks_by_protoblock_corners(
 
     # Get all protoblock corners
     corners = []
-    for i, row in protoblocks_gdf.iterrows():
-        protoblock = row.geometry
+    for protoblock in protoblocks_gdf.geometry:
         # Handle both Polygon and MultiPolygon geometries
         if protoblock.geom_type == "Polygon":
             corners.extend(list(protoblock.exterior.coords))
@@ -1427,9 +1428,7 @@ def split_sidewalks_by_protoblock_corners(
 
     # Split the sidewalks
     new_sidewalks = []
-    for i, row in sidewalks_gdf.iterrows():
-        sidewalk = row.geometry
-
+    for sidewalk in sidewalks_gdf.geometry:
         # Handle different geometry types - convert polygons to boundaries
         if sidewalk.geom_type == "Polygon":
             sidewalk = sidewalk.boundary
@@ -1505,9 +1504,7 @@ def split_sidewalks_by_max_length(
         A new GeoDataFrame containing the split sidewalk segments.
     """
     new_sidewalks = []
-    for i, row in sidewalks_gdf.iterrows():
-        sidewalk = row.geometry
-
+    for sidewalk in sidewalks_gdf.geometry:
         # Add defensive checks
         if sidewalk is None or sidewalk.is_empty or not sidewalk.is_valid:
             continue
@@ -1571,8 +1568,7 @@ def split_sidewalks_by_num_segments(
         A new GeoDataFrame containing the split sidewalk segments.
     """
     new_sidewalks = []
-    for i, row in sidewalks_gdf.iterrows():
-        sidewalk = row.geometry
+    for sidewalk in sidewalks_gdf.geometry:
         segment_length = sidewalk.length / num_segments
         splitter_points = [
             sidewalk.interpolate((i + 1) * segment_length)
@@ -1741,8 +1737,7 @@ def split_sidewalks_gdf(
 
     # Split the sidewalks (defensive: handle different geom types and empty splitter)
     new_sidewalks = []
-    for i, row in sidewalks_gdf.iterrows():
-        geom = row.geometry
+    for geom in sidewalks_gdf.geometry:
         if geom is None or geom.is_empty:
             continue
 
@@ -1827,9 +1822,7 @@ def generate_kerbs_gdf(crossings_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """
     kerbs = []
 
-    for _, row in crossings_gdf.iterrows():
-        line = row.geometry
-
+    for line in crossings_gdf.geometry:
         if line.geom_type != "LineString":
             continue
 

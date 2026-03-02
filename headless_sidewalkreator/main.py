@@ -109,33 +109,33 @@ def create_merged_output(output_directory, sidewalks_gdf, crossings_gdf, kerbs_g
     # Add sidewalks as lines
     if sidewalks_gdf is not None and not sidewalks_gdf.empty:
         sidewalks_4326 = sidewalks_gdf.to_crs("EPSG:4326")
-        for _, row in sidewalks_4326.iterrows():
+        for geom in sidewalks_4326.geometry:
             feature = {
                 "type": "Feature",
                 "properties": {"highway": "footway", "footway": "sidewalk"},
-                "geometry": row.geometry.__geo_interface__
+                "geometry": geom.__geo_interface__
             }
             merged_features.append(feature)
 
     # Add crossings as lines
     if crossings_gdf is not None and not crossings_gdf.empty:
         crossings_4326 = crossings_gdf.to_crs("EPSG:4326")
-        for _, row in crossings_4326.iterrows():
+        for geom in crossings_4326.geometry:
             feature = {
                 "type": "Feature",
                 "properties": {"highway": "footway", "footway": "crossing"},
-                "geometry": row.geometry.__geo_interface__
+                "geometry": geom.__geo_interface__
             }
             merged_features.append(feature)
 
     # Add kerbs as points
     if kerbs_gdf is not None and not kerbs_gdf.empty:
         kerbs_4326 = kerbs_gdf.to_crs("EPSG:4326")
-        for _, row in kerbs_4326.iterrows():
+        for geom in kerbs_4326.geometry:
             feature = {
                 "type": "Feature",
                 "properties": {"barrier": "kerb"},
-                "geometry": row.geometry.__geo_interface__
+                "geometry": geom.__geo_interface__
             }
             merged_features.append(feature)
 

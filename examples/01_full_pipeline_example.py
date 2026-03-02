@@ -168,33 +168,33 @@ def create_merged_josm_output(sidewalks_gdf, crossings_gdf, kerbs_gdf, output_di
     # Add sidewalks with OSM tags
     if not sidewalks_gdf.empty:
         sidewalks_4326 = sidewalks_gdf.to_crs("EPSG:4326")
-        for _, row in sidewalks_4326.iterrows():
+        for geom in sidewalks_4326.geometry:
             feature = {
                 "type": "Feature",
                 "properties": {"highway": "footway", "footway": "sidewalk"},
-                "geometry": row.geometry.__geo_interface__,
+                "geometry": geom.__geo_interface__,
             }
             merged_features.append(feature)
 
     # Add crossings with OSM tags
     if not crossings_gdf.empty:
         crossings_4326 = crossings_gdf.to_crs("EPSG:4326")
-        for _, row in crossings_4326.iterrows():
+        for geom in crossings_4326.geometry:
             feature = {
                 "type": "Feature",
                 "properties": {"highway": "footway", "footway": "crossing"},
-                "geometry": row.geometry.__geo_interface__,
+                "geometry": geom.__geo_interface__,
             }
             merged_features.append(feature)
 
     # Add kerbs with OSM tags
     if not kerbs_gdf.empty:
         kerbs_4326 = kerbs_gdf.to_crs("EPSG:4326")
-        for _, row in kerbs_4326.iterrows():
+        for geom in kerbs_4326.geometry:
             feature = {
                 "type": "Feature",
                 "properties": {"barrier": "kerb"},
-                "geometry": row.geometry.__geo_interface__,
+                "geometry": geom.__geo_interface__,
             }
             merged_features.append(feature)
 
