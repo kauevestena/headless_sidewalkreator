@@ -23,6 +23,7 @@ from headless_sidewalkreator.generic_functions import (
     generate_kerbs_gdf,
     bbox_to_gdf,
     calculate_tangent_direction,
+    calculate_sidewalk_properties,
 )
 from headless_sidewalkreator.parameters import default_widths, fallback_default_width
 
@@ -448,3 +449,49 @@ def test_calculate_tangent_direction():
     dx, dy = calculate_tangent_direction(p1, p2)
     assert dx == 1.0
     assert dy == 0.0
+
+
+def test_calculate_sidewalk_properties_basic():
+    """Test calculate_sidewalk_properties with Polygons and LineStrings."""
+    # Polygon with area 1 and perimeter 4
+    poly = Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
+    # LineString with area 0 and perimeter (length) 2
+    line = LineString([(0, 0), (2, 0)])
+
+    gdf = gpd.GeoDataFrame(geometry=[poly, line], crs="EPSG:3857")
+
+    result_gdf = calculate_sidewalk_properties(gdf)
+
+    assert "area" in result_gdf.columns
+    assert "perimeter" in result_gdf.columns
+
+    assert result_gdf["area"].iloc[0] == 1.0
+    assert result_gdf["perimeter"].iloc[0] == 4.0
+
+    assert result_gdf["area"].iloc[1] == 0.0
+    assert result_gdf["perimeter"].iloc[1] == 2.0
+
+def test_calculate_sidewalk_properties_empty():
+    """Test calculate_sidewalk_properties with an empty GeoDataFrame."""
+    gdf = gpd.GeoDataFrame(geometry=[], crs="EPSG:3857")
+
+    result_gdf = calculate_sidewalk_properties(gdf)
+
+    assert "area" in result_gdf.columns
+    assert "perimeter" in result_gdf.columns
+    assert len(result_gdf) == 0
+
+def test_calculate_sidewalk_properties_point():
+    """Test calculate_sidewalk_properties with Point geometries."""
+    # Point has area 0 and perimeter (length) 0
+    pt = Point(0, 0)
+
+    gdf = gpd.GeoDataFrame(geometry=[pt], crs="EPSG:3857")
+
+    result_gdf = calculate_sidewalk_properties(gdf)
+
+    assert "area" in result_gdf.columns
+    assert "perimeter" in result_gdf.columns
+
+    assert result_gdf["area"].iloc[0] == 0.0
+    assert result_gdf["perimeter"].iloc[0] == 0.0
