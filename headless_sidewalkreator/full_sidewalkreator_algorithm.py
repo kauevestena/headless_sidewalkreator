@@ -3,12 +3,9 @@
 This module exposes the sidewalkreator function - the modern GeoDataFrame-based API.
 """
 
-import json
-import os
 import geopandas as gpd
 import osmnx as ox
 from .generic_functions import (
-    read_input_polygon,
     get_bbox_from_gdf,
     bbox_to_gdf,
     fetch_street_network_for_bbox,
