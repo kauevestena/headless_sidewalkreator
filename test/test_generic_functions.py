@@ -1,3 +1,4 @@
+import math
 import pytest
 import geopandas as gpd
 from shapely.geometry import LineString, Polygon, Point
@@ -21,6 +22,7 @@ from headless_sidewalkreator.generic_functions import (
     calculate_crossing_direction,
     generate_kerbs_gdf,
     bbox_to_gdf,
+    calculate_tangent_direction,
 )
 from headless_sidewalkreator.parameters import default_widths, fallback_default_width
 
@@ -408,3 +410,41 @@ def test_bbox_to_gdf():
     # Test with custom CRS
     gdf_utm = bbox_to_gdf(bbox, crs="EPSG:3857")
     assert gdf_utm.crs.to_string() == "EPSG:3857"
+
+def test_calculate_tangent_direction():
+    """Test calculate_tangent_direction with various cases."""
+    # Normal case: diagonal
+    p1 = (0.0, 0.0)
+    p2 = (1.0, 1.0)
+    dx, dy = calculate_tangent_direction(p1, p2)
+    expected_val = 1.0 / math.sqrt(2.0)
+    assert dx == pytest.approx(expected_val)
+    assert dy == pytest.approx(expected_val)
+
+    # Normal case: horizontal
+    p1 = (0.0, 0.0)
+    p2 = (5.0, 0.0)
+    dx, dy = calculate_tangent_direction(p1, p2)
+    assert dx == 1.0
+    assert dy == 0.0
+
+    # Normal case: vertical
+    p1 = (0.0, 0.0)
+    p2 = (0.0, -2.0)
+    dx, dy = calculate_tangent_direction(p1, p2)
+    assert dx == 0.0
+    assert dy == -1.0
+
+    # Edge case: identical points
+    p1 = (1.23, 4.56)
+    p2 = (1.23, 4.56)
+    dx, dy = calculate_tangent_direction(p1, p2)
+    assert dx == 1.0
+    assert dy == 0.0
+
+    # Edge case: very close points (< 1e-6)
+    p1 = (0.0, 0.0)
+    p2 = (5e-7, 5e-7)
+    dx, dy = calculate_tangent_direction(p1, p2)
+    assert dx == 1.0
+    assert dy == 0.0

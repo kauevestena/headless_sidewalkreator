@@ -5,6 +5,7 @@ This module provides a collection of functions for reading, processing, and
 transforming geospatial data using GeoPandas and other related libraries.
 """
 
+import math
 import geopandas as gpd
 from typing import Optional
 from shapely.geometry import (
@@ -520,6 +521,27 @@ def handle_sidewalk_tags(
     return sidewalks_gdf
 
 
+def calculate_tangent_direction(
+    p1: tuple[float, float], p2: tuple[float, float]
+) -> tuple[float, float]:
+    """Calculates the unit tangent vector from p1 to p2.
+
+    Args:
+        p1: The start point as a (x, y) tuple.
+        p2: The end point as a (x, y) tuple.
+
+    Returns:
+        A tuple representing the unit tangent vector (dx, dy).
+    """
+    # Vector from p1 to p2
+    dx = p2[0] - p1[0]
+    dy = p2[1] - p1[1]
+    length = math.hypot(dx, dy)
+    if length < 1e-6:
+        return (1.0, 0.0)  # default fallback
+    return (dx / length, dy / length)
+
+
 import networkx as nx
 
 
@@ -698,9 +720,6 @@ def filter_and_buffer_protoblocks_gdf(
 
     # Dissolve and buffer
     return _dissolve_and_buffer_protoblocks(filtered_protoblocks)
-
-
-import math
 
 
 def calculate_crossing_direction(point: Point, lines_df: gpd.GeoDataFrame) -> Point:
