@@ -282,7 +282,8 @@ def polygonize_lines_gdf(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     return gdf_poly
 
 
-import ast
+import json
+import re
 import pandas as pd
 
 from shapely.ops import split, substring
@@ -1971,11 +1972,31 @@ def data_clean_gdf(
 
     # Parse other_tags
     def parse_tags(tags):
+        """Safe parser for OSM tags in JSON or HSTORE-like format."""
         if not tags or tags == "nan":
             return {}
+
+        # Limit string length to prevent resource exhaustion
+        if len(tags) > 100000:
+            return {}
+
+        # 1. Try JSON format
         try:
-            return ast.literal_eval(tags)
-        except (ValueError, SyntaxError):
+            return json.loads(tags)
+        except (json.JSONDecodeError, RecursionError):
+            pass
+
+        # 2. Try HSTORE-like format: "key"=>"value", "key2"=>"value2"
+        d = {}
+        try:
+            # This regex matches "key"=>"value" pairs, handles backslash-escaped quotes
+            pattern = r'"((?:\\.|[^"\\])*)"\s*=>\s*"((?:\\.|[^"\\])*)"'
+            for match in re.finditer(pattern, tags):
+                key = match.group(1).replace('\\"', '"').replace('\\\\', '\\')
+                value = match.group(2).replace('\\"', '"').replace('\\\\', '\\')
+                d[key] = value
+            return d
+        except Exception:
             return {}
 
     if "other_tags" in gdf.columns:
