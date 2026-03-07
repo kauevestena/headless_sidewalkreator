@@ -479,22 +479,26 @@ def handle_sidewalk_tags(
     sure_geometries = []
 
     # Handle sidewalk=no
-    no_sidewalk_streets = streets_gdf[streets_gdf["sidewalk"] == "no"].copy()
-    for street in no_sidewalk_streets.itertuples():
-        road_width = getattr(street, "width", 6.0)
-        buffer_distance = (road_width / 2) + 1.0
-        exclusion_geometries.append(street.geometry.buffer(buffer_distance))
+    no_sidewalk_streets = streets_gdf[streets_gdf["sidewalk"] == "no"]
+    if not no_sidewalk_streets.empty:
+        # Vectorized buffer: road_width/2 + 1.0
+        road_widths = no_sidewalk_streets.get("width", 6.0)
+        buffer_distances = (road_widths / 2) + 1.0
+        exclusion_geometries.extend(
+            no_sidewalk_streets.geometry.buffer(buffer_distances)
+        )
 
     # Handle sidewalk=left/right
     for side in ["left", "right"]:
-        side_streets = streets_gdf[streets_gdf["sidewalk"] == side].copy()
-        for street in side_streets.itertuples():
-            road_width = getattr(street, "width", 6.0)
-            buffer_distance = road_width / 2
-            offset_line = street.geometry.parallel_offset(
-                buffer_distance, side, join_style=2
+        side_streets = streets_gdf[streets_gdf["sidewalk"] == side]
+        if not side_streets.empty:
+            # Vectorized offset and buffer
+            road_widths = side_streets.get("width", 6.0)
+            buffer_distances = road_widths / 2
+            offset_lines = side_streets.geometry.parallel_offset(
+                buffer_distances, side, join_style=2
             )
-            exclusion_geometries.append(offset_line.buffer(1.0))
+            exclusion_geometries.extend(offset_lines.buffer(1.0))
 
     # Apply exclusion zones first
     if exclusion_geometries:
@@ -505,11 +509,12 @@ def handle_sidewalk_tags(
         sidewalks_gdf = sidewalks_gdf[~sidewalks_gdf.geometry.is_empty].copy()
 
     # Handle sidewalk=yes/both (sure zones)
-    sure_streets = streets_gdf[streets_gdf["sidewalk"].isin(["yes", "both"])].copy()
-    for street in sure_streets.itertuples():
-        road_width = getattr(street, "width", 6.0)
-        buffer_distance = (road_width / 2) + 1.0
-        sure_geometries.append(street.geometry.buffer(buffer_distance))
+    sure_streets = streets_gdf[streets_gdf["sidewalk"].isin(["yes", "both"])]
+    if not sure_streets.empty:
+        # Vectorized buffer: road_width/2 + 1.0
+        road_widths = sure_streets.get("width", 6.0)
+        buffer_distances = (road_widths / 2) + 1.0
+        sure_geometries.extend(sure_streets.geometry.buffer(buffer_distances))
 
     # If sure zones exist, constrain sidewalks to them
     if sure_geometries:
