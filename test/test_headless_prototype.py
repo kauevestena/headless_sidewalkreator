@@ -75,10 +75,12 @@ def test_sidewalkreator_api(setup_test_dir, test_polygon_gdf, osm_sample_gdf):
     assert not crossings_gdf.empty
 
 
-def test_main_cli_entrypoint(setup_test_dir):
+@patch('headless_sidewalkreator.full_sidewalkreator_algorithm.fetch_street_network_for_bbox')
+def test_main_cli_entrypoint(mock_fetch, setup_test_dir, osm_sample_gdf):
     """Test the command-line entry point of main.py."""
-    import subprocess
     import sys
+    from unittest.mock import patch
+    from headless_sidewalkreator.main import main
 
     test_dir = setup_test_dir
     input_polygon = os.path.join(
@@ -86,29 +88,30 @@ def test_main_cli_entrypoint(setup_test_dir):
     )
     output_dir = os.path.join(test_dir, "cli_output")
 
-    # Run the main.py script as a module
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "headless_sidewalkreator.main",
-            "--input-file",
-            input_polygon,
-            "--output-dir",
-            output_dir,
-        ],
-        capture_output=True,
-        text=True,
-    )
+    mock_fetch.return_value = osm_sample_gdf
 
-    assert result.returncode == 0, f"CLI process failed with output:\n{result.stderr}"
-    assert "Process complete" in result.stdout
+    test_args = [
+        "headless_sidewalkreator",
+        "--input-file",
+        input_polygon,
+        "--output-dir",
+        output_dir,
+    ]
+
+    with patch.object(sys, 'argv', test_args):
+        main()
+
+    # Verify that output files were created
+    assert os.path.exists(output_dir)
+    assert os.path.exists(os.path.join(output_dir, "sidewalks_output.geojson"))
 
 
-def test_main_cli_with_ignore_existing_flag(setup_test_dir):
+@patch('headless_sidewalkreator.full_sidewalkreator_algorithm.fetch_street_network_for_bbox')
+def test_main_cli_with_ignore_existing_flag(mock_fetch, setup_test_dir, osm_sample_gdf):
     """Test the command-line entry point with --ignore-existing flag."""
-    import subprocess
     import sys
+    from unittest.mock import patch
+    from headless_sidewalkreator.main import main
 
     test_dir = setup_test_dir
     input_polygon = os.path.join(
@@ -116,24 +119,23 @@ def test_main_cli_with_ignore_existing_flag(setup_test_dir):
     )
     output_dir = os.path.join(test_dir, "cli_ignore_output")
 
-    # Run the main.py script with the ignore-existing flag
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "headless_sidewalkreator.main",
-            "--input-file",
-            input_polygon,
-            "--output-dir",
-            output_dir,
-            "--ignore-existing",
-        ],
-        capture_output=True,
-        text=True,
-    )
+    mock_fetch.return_value = osm_sample_gdf
 
-    assert result.returncode == 0, f"CLI process failed with output:\n{result.stderr}"
-    assert "Process complete" in result.stdout
+    test_args = [
+        "headless_sidewalkreator",
+        "--input-file",
+        input_polygon,
+        "--output-dir",
+        output_dir,
+        "--ignore-existing",
+    ]
+
+    with patch.object(sys, 'argv', test_args):
+        main()
+
+    # Verify that output files were created
+    assert os.path.exists(output_dir)
+    assert os.path.exists(os.path.join(output_dir, "sidewalks_output.geojson"))
 
 
 @patch('headless_sidewalkreator.full_sidewalkreator_algorithm.fetch_street_network_for_bbox')
@@ -253,10 +255,12 @@ def test_ignore_existing_parameter(setup_test_dir, test_polygon_gdf, osm_sample_
     print(f"Ignore existing mode generated {len(ignore_gdf)} sidewalks")
 
 
-def test_main_cli_with_bbox(setup_test_dir):
+@patch('headless_sidewalkreator.full_sidewalkreator_algorithm.fetch_street_network_for_bbox')
+def test_main_cli_with_bbox(mock_fetch, setup_test_dir, osm_sample_gdf):
     """Test the command-line entry point with bbox parameter."""
-    import subprocess
     import sys
+    from unittest.mock import patch
+    from headless_sidewalkreator.main import main
 
     test_dir = setup_test_dir
     output_dir = os.path.join(test_dir, "cli_bbox_output")
@@ -264,28 +268,22 @@ def test_main_cli_with_bbox(setup_test_dir):
     # Use a small bbox to avoid long processing times
     bbox = [-0.01, -0.01, 0.01, 0.01]
 
-    # Run the main.py script with bbox argument
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "headless_sidewalkreator.main",
-            "--bbox",
-            str(bbox[0]),
-            str(bbox[1]),
-            str(bbox[2]),
-            str(bbox[3]),
-            "--output-dir",
-            output_dir,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=60  # Add timeout to prevent hanging
-    )
+    mock_fetch.return_value = osm_sample_gdf
 
-    assert result.returncode == 0, f"CLI process failed with output:\n{result.stderr}"
-    assert "Process complete" in result.stdout
-    
+    test_args = [
+        "headless_sidewalkreator",
+        "--bbox",
+        str(bbox[0]),
+        str(bbox[1]),
+        str(bbox[2]),
+        str(bbox[3]),
+        "--output-dir",
+        output_dir,
+    ]
+
+    with patch.object(sys, 'argv', test_args):
+        main()
+
     # Verify that output files were created
     assert os.path.exists(output_dir)
     assert os.path.exists(os.path.join(output_dir, "sidewalks_output.geojson"))
