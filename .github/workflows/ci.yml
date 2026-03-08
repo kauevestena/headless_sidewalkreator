@@ -2,9 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [ headless-prototype ]
   pull_request:
-    branches: [ headless-prototype ]
 
 jobs:
   test:
