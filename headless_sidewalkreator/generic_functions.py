@@ -287,6 +287,48 @@ import json
 import re
 import pandas as pd
 
+# Regular expression for HSTORE-like format
+# This unrolled loop pattern is robust against ReDoS and handles backslash-escaped characters
+HSTORE_PATTERN = re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"\s*=>\s*"([^"\\]*(?:\\.[^"\\]*)*)"')
+
+
+def parse_tags(tags: str) -> dict:
+    """Safe parser for OSM tags in JSON or HSTORE-like format."""
+    if not tags or tags == "nan" or not isinstance(tags, str):
+        return {}
+
+    # Limit string length to prevent resource exhaustion
+    if len(tags) > 100000:
+        return {}
+
+    # Check for excessive nesting to prevent RecursionError during JSON parsing
+    depth = 0
+    max_depth = 20
+    for char in tags:
+        if char in ("{", "["):
+            depth += 1
+        elif char in ("}", "]"):
+            depth -= 1
+        if depth > max_depth:
+            return {}
+
+    # 1. Try JSON format
+    try:
+        return json.loads(tags)
+    except (json.JSONDecodeError, RecursionError):
+        pass
+
+    # 2. Try HSTORE-like format: "key"=>"value", "key2"=>"value2"
+    d = {}
+    try:
+        for match in HSTORE_PATTERN.finditer(tags):
+            key = match.group(1).replace('\\"', '"').replace('\\\\', '\\')
+            value = match.group(2).replace('\\"', '"').replace('\\\\', '\\')
+            d[key] = value
+        return d
+    except Exception:
+        return {}
+
 from shapely.ops import split, substring
 from shapely.geometry import MultiPoint, Point
 
@@ -1997,34 +2039,6 @@ def data_clean_gdf(
             - existing_crossings: A GeoDataFrame of existing crossings.
     """
 
-    # Parse other_tags
-    def parse_tags(tags):
-        """Safe parser for OSM tags in JSON or HSTORE-like format."""
-        if not tags or tags == "nan":
-            return {}
-
-        # Limit string length to prevent resource exhaustion
-        if len(tags) > 100000:
-            return {}
-
-        # 1. Try JSON format
-        try:
-            return json.loads(tags)
-        except (json.JSONDecodeError, RecursionError):
-            pass
-
-        # 2. Try HSTORE-like format: "key"=>"value", "key2"=>"value2"
-        d = {}
-        try:
-            # This regex matches "key"=>"value" pairs, handles backslash-escaped quotes
-            pattern = r'"((?:\\.|[^"\\])*)"\s*=>\s*"((?:\\.|[^"\\])*)"'
-            for match in re.finditer(pattern, tags):
-                key = match.group(1).replace('\\"', '"').replace('\\\\', '\\')
-                value = match.group(2).replace('\\"', '"').replace('\\\\', '\\')
-                d[key] = value
-            return d
-        except Exception:
-            return {}
 
     if "other_tags" in gdf.columns:
         tags_df = gdf["other_tags"].apply(parse_tags).apply(pd.Series)
