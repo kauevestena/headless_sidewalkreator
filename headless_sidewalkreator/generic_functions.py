@@ -325,6 +325,12 @@ def parse_tags(tags: str) -> dict:
 
 from shapely.ops import split, substring
 
+# HSTORE-like format regex: "key"=>"value", handles backslash-escaped quotes
+# Uses an "unrolled loop" pattern for performance and ReDoS protection
+HSTORE_PATTERN = re.compile(
+    r'"([^"\\]*(?:\\.[^"\\]*)*)"\s*=>\s*"([^"\\]*(?:\\.[^"\\]*)*)"'
+)
+
 
 def split_lines_at_intersections(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """Splits lines at their intersections.
@@ -2025,6 +2031,32 @@ def data_clean_gdf(
             - existing_crossings: A GeoDataFrame of existing crossings.
     """
 
+    # Parse other_tags
+    def parse_tags(tags):
+        """Safe parser for OSM tags in JSON or HSTORE-like format."""
+        if not tags or tags == "nan":
+            return {}
+
+        # Limit string length to prevent resource exhaustion
+        if len(tags) > 100000:
+            return {}
+
+        # 1. Try JSON format
+        try:
+            return json.loads(tags)
+        except (json.JSONDecodeError, RecursionError):
+            pass
+
+        # 2. Try HSTORE-like format: "key"=>"value", "key2"=>"value2"
+        d = {}
+        try:
+            for match in HSTORE_PATTERN.finditer(tags):
+                key = match.group(1).replace('\\"', '"').replace('\\\\', '\\')
+                value = match.group(2).replace('\\"', '"').replace('\\\\', '\\')
+                d[key] = value
+            return d
+        except Exception:
+            return {}
 
     if "other_tags" in gdf.columns:
         tags_df = gdf["other_tags"].apply(parse_tags).apply(pd.Series)
