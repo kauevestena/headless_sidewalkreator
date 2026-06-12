@@ -290,6 +290,12 @@ import pandas as pd
 from shapely.ops import split, substring
 from shapely.geometry import MultiPoint, Point
 
+# HSTORE-like format regex: "key"=>"value", handles backslash-escaped quotes
+# Uses an "unrolled loop" pattern for performance and ReDoS protection
+HSTORE_PATTERN = re.compile(
+    r'"([^"\\]*(?:\\.[^"\\]*)*)"\s*=>\s*"([^"\\]*(?:\\.[^"\\]*)*)"'
+)
+
 
 def split_lines_at_intersections(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """Splits lines at their intersections.
@@ -2016,9 +2022,7 @@ def data_clean_gdf(
         # 2. Try HSTORE-like format: "key"=>"value", "key2"=>"value2"
         d = {}
         try:
-            # This regex matches "key"=>"value" pairs, handles backslash-escaped quotes
-            pattern = r'"((?:\\.|[^"\\])*)"\s*=>\s*"((?:\\.|[^"\\])*)"'
-            for match in re.finditer(pattern, tags):
+            for match in HSTORE_PATTERN.finditer(tags):
                 key = match.group(1).replace('\\"', '"').replace('\\\\', '\\')
                 value = match.group(2).replace('\\"', '"').replace('\\\\', '\\')
                 d[key] = value
