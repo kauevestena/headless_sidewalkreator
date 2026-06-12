@@ -9,11 +9,9 @@ import math
 import geopandas as gpd
 from typing import Optional
 from shapely.geometry import (
-    GeometryCollection,
     LineString,
     MultiLineString,
     MultiPoint,
-    MultiPolygon,
     Point,
     Polygon,
 )
@@ -163,8 +161,6 @@ def fetch_street_network_for_bbox(bbox: tuple, timeout: int = 60) -> gpd.GeoData
             minx, miny, maxx, maxy = arr
 
         # Create a small cross network and one extra branch
-        from shapely.geometry import LineString
-
         lines = [
             LineString([(minx, miny), (maxx, maxy)]),
             LineString([(minx, maxy), (maxx, miny)]),
@@ -240,8 +236,6 @@ def polygonize_lines_gdf(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         # rings when endpoints are nearly identical but have tiny floating
         # differences. Round to 6 decimal places which is sufficient for our
         # test fixtures and typical projected coordinates.
-        from shapely.geometry import LineString
-
         snapped_lines = []
         for ln in lines:
             if ln is None or ln.is_empty:
@@ -288,7 +282,6 @@ import re
 import pandas as pd
 
 from shapely.ops import split, substring
-from shapely.geometry import MultiPoint, Point
 
 
 def split_lines_at_intersections(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
@@ -549,9 +542,6 @@ def calculate_tangent_direction(
     if length < 1e-6:
         return (1.0, 0.0)  # default fallback
     return (dx / length, dy / length)
-
-
-import networkx as nx
 
 
 def remove_lines_from_no_block_gdf(
@@ -1469,8 +1459,6 @@ def split_sidewalks_by_protoblock_corners(
             if len(boundaries) == 1:
                 sidewalk = boundaries[0]
             else:
-                from shapely.geometry import MultiLineString
-
                 sidewalk = MultiLineString(boundaries)
 
         # Now handle LineString and MultiLineString
@@ -1503,8 +1491,6 @@ def split_sidewalks_by_protoblock_corners(
                     new_sidewalks.append(sidewalk)
         else:
             # For unsupported geometry types (Point, etc.), return empty geometry
-            from shapely.geometry import Point
-
             if sidewalk.geom_type in ["Point", "MultiPoint"]:
                 new_sidewalks.append(Point().boundary)  # Empty geometry
             else:
