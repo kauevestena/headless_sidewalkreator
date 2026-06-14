@@ -495,3 +495,60 @@ def test_calculate_sidewalk_properties_point():
 
     assert result_gdf["area"].iloc[0] == 0.0
     assert result_gdf["perimeter"].iloc[0] == 0.0
+
+
+def test_clean_geometries_gdf():
+    """Test that clean_geometries_gdf correctly simplifies, snaps, makes valid, and drops empty geometries."""
+    from headless_sidewalkreator.generic_functions import clean_geometries_gdf
+
+    # 1. Valid geometry that gets precision set (snapped)
+    p_valid = Polygon([(0, 0), (0.22, 0), (0.22, 0.22), (0, 0.22), (0, 0)])
+
+    # 2. Geometry that becomes invalid/empty due to snapping
+    p_tiny = Polygon([(0, 0), (0.01, 0), (0.01, 0.01), (0, 0.01), (0, 0)])
+
+    # 3. Invalid geometry (bow-tie)
+    p_invalid = Polygon([(0, 0), (2, 2), (2, 0), (0, 2), (0, 0)])
+
+    # 4. Geometry with collinear points (to test simplify)
+    p_collinear = Polygon([(0, 0), (1, 0), (2, 0), (2, 2), (0, 2), (0, 0)])
+
+    # 5. Empty geometry
+    p_empty = Polygon()
+
+    gdf = gpd.GeoDataFrame(geometry=[p_valid, p_tiny, p_invalid, p_collinear, p_empty], crs="EPSG:3857")
+
+    # Tolerance of 0.1 means grid size is 0.1
+    # p_valid vertices should become (0.22 -> 0.2)
+    # p_tiny should collapse and be dropped
+    # p_invalid (bow-tie) should be made valid (MultiPolygon)
+    # p_collinear should have its extra point (1,0) removed by simplify
+    cleaned_gdf = clean_geometries_gdf(gdf, tolerance=0.1)
+
+    # CRS should be maintained
+    assert str(cleaned_gdf.crs) == "EPSG:3857"
+
+    # Check that invalid, collinear, empty and collapsed geometries were handled appropriately
+    geoms = cleaned_gdf.geometry.tolist()
+
+    # p_empty and p_tiny should be removed (None / collapsed to empty)
+    # So we expect 3 geometries in the output
+    assert len(geoms) == 3
+
+    # All geometries should be valid
+    assert all(g.is_valid for g in geoms)
+
+    # p_valid snapped (coordinates might be reordered slightly by set_precision)
+    coords_set = set(geoms[0].exterior.coords)
+    expected_set = {(0.0, 0.0), (0.2, 0.0), (0.2, 0.2), (0.0, 0.2)}
+    assert expected_set.issubset(coords_set)
+
+    # p_invalid made valid (it becomes a MultiPolygon usually with make_valid)
+    assert geoms[1].geom_type in ["MultiPolygon", "Polygon"]
+
+    # p_collinear simplified and snapped
+    # originally: [(0, 0), (1, 0), (2, 0), (2, 2), (0, 2), (0, 0)]
+    # with simplify it should become roughly [(0, 0), (2, 0), (2, 2), (0, 2), (0, 0)]
+    # and snapped to 0.1 (coordinates are already integers, so unchanged by snapping)
+    assert len(geoms[2].exterior.coords) == 5
+    assert (1.0, 0.0) not in list(geoms[2].exterior.coords)
