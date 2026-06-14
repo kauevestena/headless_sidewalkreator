@@ -60,9 +60,14 @@ def save_results_to_directory(result, output_directory):
     if not protoblocks_gdf.empty:
         protoblocks_gdf.to_crs("EPSG:4326").to_file(output_path, driver="GeoJSON")
 
+    # Pre-convert to EPSG:4326 for reuse
+    sidewalks_4326 = splitted_sidewalks_gdf.to_crs("EPSG:4326") if not splitted_sidewalks_gdf.empty else splitted_sidewalks_gdf
+    crossings_4326 = crossings_gdf.to_crs("EPSG:4326") if not crossings_gdf.empty else crossings_gdf
+    kerbs_4326 = kerbs_gdf.to_crs("EPSG:4326") if not kerbs_gdf.empty else kerbs_gdf
+
     sidewalks_output_path = os.path.join(output_directory, "sidewalks_output.geojson")
-    if not splitted_sidewalks_gdf.empty:
-        splitted_sidewalks_gdf.to_crs("EPSG:4326").to_file(sidewalks_output_path, driver="GeoJSON")
+    if not sidewalks_4326.empty:
+        sidewalks_4326.to_file(sidewalks_output_path, driver="GeoJSON")
     else:
         # Create empty file for consistency
         empty_geojson = {"type": "FeatureCollection", "features": []}
@@ -70,8 +75,8 @@ def save_results_to_directory(result, output_directory):
             json.dump(empty_geojson, f)
 
     crossings_output_path = os.path.join(output_directory, "crossings_output.geojson")
-    if not crossings_gdf.empty:
-        crossings_gdf.to_crs("EPSG:4326").to_file(crossings_output_path, driver="GeoJSON")
+    if not crossings_4326.empty:
+        crossings_4326.to_file(crossings_output_path, driver="GeoJSON")
     else:
         # Create empty file for consistency
         empty_geojson = {"type": "FeatureCollection", "features": []}
@@ -79,15 +84,15 @@ def save_results_to_directory(result, output_directory):
             json.dump(empty_geojson, f)
 
     kerbs_output_path = os.path.join(output_directory, "kerbs_output.geojson")
-    if not kerbs_gdf.empty:
-        kerbs_gdf.to_crs("EPSG:4326").to_file(kerbs_output_path, driver="GeoJSON")
+    if not kerbs_4326.empty:
+        kerbs_4326.to_file(kerbs_output_path, driver="GeoJSON")
 
     # Create merged output file (following QGIS plugin behavior)
     create_merged_output(
         output_directory,
-        splitted_sidewalks_gdf if not splitted_sidewalks_gdf.empty else None,
-        crossings_gdf if not crossings_gdf.empty else None,
-        kerbs_gdf if not kerbs_gdf.empty else None,
+        sidewalks_4326 if not sidewalks_4326.empty else None,
+        crossings_4326 if not crossings_4326.empty else None,
+        kerbs_4326 if not kerbs_4326.empty else None,
     )
 
     # Save parameters to a file
@@ -103,13 +108,15 @@ def create_merged_output(output_directory, sidewalks_gdf, crossings_gdf, kerbs_g
 
     This follows the QGIS plugin behavior of creating a single file with
     all features for easy uploading to OpenStreetMap.
+    Note: The input GeoDataFrames must already be in EPSG:4326.
     """
     merged_features = []
+    sidewalk_count = 0
+    crossing_count = 0
 
     # Add sidewalks as lines
     if sidewalks_gdf is not None and not sidewalks_gdf.empty:
-        sidewalks_4326 = sidewalks_gdf.to_crs("EPSG:4326")
-        for geom in sidewalks_4326.geometry:
+        for geom in sidewalks_gdf.geometry:
             feature = {
                 "type": "Feature",
                 "properties": {"highway": "footway", "footway": "sidewalk"},
@@ -119,8 +126,7 @@ def create_merged_output(output_directory, sidewalks_gdf, crossings_gdf, kerbs_g
 
     # Add crossings as lines
     if crossings_gdf is not None and not crossings_gdf.empty:
-        crossings_4326 = crossings_gdf.to_crs("EPSG:4326")
-        for geom in crossings_4326.geometry:
+        for geom in crossings_gdf.geometry:
             feature = {
                 "type": "Feature",
                 "properties": {"highway": "footway", "footway": "crossing"},
@@ -130,8 +136,7 @@ def create_merged_output(output_directory, sidewalks_gdf, crossings_gdf, kerbs_g
 
     # Add kerbs as points
     if kerbs_gdf is not None and not kerbs_gdf.empty:
-        kerbs_4326 = kerbs_gdf.to_crs("EPSG:4326")
-        for geom in kerbs_4326.geometry:
+        for geom in kerbs_gdf.geometry:
             feature = {
                 "type": "Feature",
                 "properties": {"barrier": "kerb"},
@@ -154,8 +159,8 @@ def create_merged_output(output_directory, sidewalks_gdf, crossings_gdf, kerbs_g
     comment_path = os.path.join(output_directory, "changeset_comment.txt")
     with open(comment_path, 'w') as f:
         f.write("Generated sidewalks, crossings, and kerbs using OSM SidewalKreator\n")
-        f.write(f"Added {len([f for f in merged_features if f['properties'].get('footway') == 'sidewalk'])} sidewalk segments\n")
-        f.write(f"Added {len([f for f in merged_features if f['properties'].get('footway') == 'crossing'])} crossings\n")
+        f.write(f"Added {sidewalk_count} sidewalk segments\n")
+        f.write(f"Added {crossing_count} crossings\n")
 
 
 def main():

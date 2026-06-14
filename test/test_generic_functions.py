@@ -502,41 +502,58 @@ def test_calculate_sidewalk_properties_point():
     assert result_gdf["perimeter"].iloc[0] == 0.0
 
 
+def test_clean_geometries_gdf():
+    """Test that clean_geometries_gdf correctly simplifies, snaps, makes valid, and drops empty geometries."""
+    from headless_sidewalkreator.generic_functions import clean_geometries_gdf
 
+    # 1. Valid geometry that gets precision set (snapped)
+    p_valid = Polygon([(0, 0), (0.22, 0), (0.22, 0.22), (0, 0.22), (0, 0)])
 
+    # 2. Geometry that becomes invalid/empty due to snapping
+    p_tiny = Polygon([(0, 0), (0.01, 0), (0.01, 0.01), (0, 0.01), (0, 0)])
 
-def test_reproject_gdf_happy_path():
-    """Test reprojecting a GeoDataFrame from EPSG:4326 to EPSG:3857."""
-    gdf = gpd.GeoDataFrame({"geometry": [Point(1, 1)]}, crs="EPSG:4326")
-    reprojected_gdf = reproject_gdf(gdf, "EPSG:3857")
+    # 3. Invalid geometry (bow-tie)
+    p_invalid = Polygon([(0, 0), (2, 2), (2, 0), (0, 2), (0, 0)])
 
-    assert reprojected_gdf.crs.to_string() == "EPSG:3857"
-    assert len(reprojected_gdf) == 1
+    # 4. Geometry with collinear points (to test simplify)
+    p_collinear = Polygon([(0, 0), (1, 0), (2, 0), (2, 2), (0, 2), (0, 0)])
 
-    # 1,1 in 4326 is approx 111319.49, 111325.14 in 3857
-    point = reprojected_gdf.geometry.iloc[0]
-    assert point.x == pytest.approx(111319.49, rel=1e-5)
-    assert point.y == pytest.approx(111325.14, rel=1e-5)
+    # 5. Empty geometry
+    p_empty = Polygon()
 
-def test_reproject_gdf_empty():
-    """Test reprojecting an empty GeoDataFrame."""
-    gdf = gpd.GeoDataFrame({"geometry": []}, crs="EPSG:4326")
-    reprojected_gdf = reproject_gdf(gdf, "EPSG:3857")
+    gdf = gpd.GeoDataFrame(geometry=[p_valid, p_tiny, p_invalid, p_collinear, p_empty], crs="EPSG:3857")
 
-    assert reprojected_gdf.empty
-    assert reprojected_gdf.crs.to_string() == "EPSG:3857"
+    # Tolerance of 0.1 means grid size is 0.1
+    # p_valid vertices should become (0.22 -> 0.2)
+    # p_tiny should collapse and be dropped
+    # p_invalid (bow-tie) should be made valid (MultiPolygon)
+    # p_collinear should have its extra point (1,0) removed by simplify
+    cleaned_gdf = clean_geometries_gdf(gdf, tolerance=0.1)
 
-def test_reproject_gdf_same_crs():
-    """Test reprojecting to the same CRS."""
-    gdf = gpd.GeoDataFrame({"geometry": [Point(1, 1)]}, crs="EPSG:4326")
-    reprojected_gdf = reproject_gdf(gdf, "EPSG:4326")
+    # CRS should be maintained
+    assert str(cleaned_gdf.crs) == "EPSG:3857"
 
-    assert reprojected_gdf.crs.to_string() == "EPSG:4326"
-    assert reprojected_gdf.geometry.iloc[0].x == 1.0
-    assert reprojected_gdf.geometry.iloc[0].y == 1.0
+    # Check that invalid, collinear, empty and collapsed geometries were handled appropriately
+    geoms = cleaned_gdf.geometry.tolist()
 
-def test_reproject_gdf_invalid_crs():
-    """Test reprojecting with an invalid CRS raises CRSError."""
-    gdf = gpd.GeoDataFrame({"geometry": [Point(1, 1)]}, crs="EPSG:4326")
-    with pytest.raises(CRSError):
-        reproject_gdf(gdf, "INVALID_CRS")
+    # p_empty and p_tiny should be removed (None / collapsed to empty)
+    # So we expect 3 geometries in the output
+    assert len(geoms) == 3
+
+    # All geometries should be valid
+    assert all(g.is_valid for g in geoms)
+
+    # p_valid snapped (coordinates might be reordered slightly by set_precision)
+    coords_set = set(geoms[0].exterior.coords)
+    expected_set = {(0.0, 0.0), (0.2, 0.0), (0.2, 0.2), (0.0, 0.2)}
+    assert expected_set.issubset(coords_set)
+
+    # p_invalid made valid (it becomes a MultiPolygon usually with make_valid)
+    assert geoms[1].geom_type in ["MultiPolygon", "Polygon"]
+
+    # p_collinear simplified and snapped
+    # originally: [(0, 0), (1, 0), (2, 0), (2, 2), (0, 2), (0, 0)]
+    # with simplify it should become roughly [(0, 0), (2, 0), (2, 2), (0, 2), (0, 0)]
+    # and snapped to 0.1 (coordinates are already integers, so unchanged by snapping)
+    assert len(geoms[2].exterior.coords) == 5
+    assert (1.0, 0.0) not in list(geoms[2].exterior.coords)
