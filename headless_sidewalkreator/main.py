@@ -111,6 +111,8 @@ def create_merged_output(output_directory, sidewalks_gdf, crossings_gdf, kerbs_g
     Note: The input GeoDataFrames must already be in EPSG:4326.
     """
     merged_features = []
+    sidewalk_count = 0
+    crossing_count = 0
 
     # Add sidewalks as lines
     if sidewalks_gdf is not None and not sidewalks_gdf.empty:
@@ -157,8 +159,8 @@ def create_merged_output(output_directory, sidewalks_gdf, crossings_gdf, kerbs_g
     comment_path = os.path.join(output_directory, "changeset_comment.txt")
     with open(comment_path, 'w') as f:
         f.write("Generated sidewalks, crossings, and kerbs using OSM SidewalKreator\n")
-        f.write(f"Added {len([f for f in merged_features if f['properties'].get('footway') == 'sidewalk'])} sidewalk segments\n")
-        f.write(f"Added {len([f for f in merged_features if f['properties'].get('footway') == 'crossing'])} crossings\n")
+        f.write(f"Added {sidewalk_count} sidewalk segments\n")
+        f.write(f"Added {crossing_count} crossings\n")
 
 
 def main():
