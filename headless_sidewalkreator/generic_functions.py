@@ -818,69 +818,36 @@ def calculate_crossing_direction(point: Point, lines_df: gpd.GeoDataFrame) -> Po
     return Point(math.cos(angle), math.sin(angle))
 
 
-def draw_crossings_gdf(
-    streets_gdf: gpd.GeoDataFrame,
-    sidewalks_gdf: Optional[gpd.GeoDataFrame] = None,
-    protoblocks_gdf: Optional[gpd.GeoDataFrame] = None,
-    *,
-    curve_radius: Optional[float] = None,
-    inward_offset: float = 1.0,
-    extra_length: float = 1.0,
-    increment_inward: float = 0.5,
-    max_crossings_iterations: int = 20,
-    abs_max_crossing_len: float = 100.0,
-    perc_tol_crossings: float = 25.0,
-    perc_draw_kerbs: float = 30.0,
-    ray_growth_factor: float = 2.0,
-    max_ray_iterations: int = 5,
-    node_precision: int = 6,
-) -> gpd.GeoDataFrame:
-    """Generate crossings following the documented Sidewalkreator procedure."""
 
-    from .parameters import default_curve_radius, fallback_default_width
+class _CrossingsGenerator:
+    def __init__(self):
+        self.crs = None
+        self.fallback_width = None
+        self.tolerance = None
+        self.max_ray_iterations_local = None
+        self.ray_growth_factor_local = None
+        self.sidewalks_prepared = None
+        self.sidewalks_union = None
+        self.kerb_fraction = None
+        self.distance_tol = None
+        self.base_curve_radius = None
+    def _empty_result(self) -> gpd.GeoDataFrame:
+        return gpd.GeoDataFrame(geometry=[], crs=self.crs)
 
-    crs = streets_gdf.crs if streets_gdf is not None else None
-
-    def _empty_result() -> gpd.GeoDataFrame:
-        return gpd.GeoDataFrame(geometry=[], crs=crs)
-
-    if streets_gdf is None or streets_gdf.empty:
-        return _empty_result()
-
-    if sidewalks_gdf is None or sidewalks_gdf.empty:
-        return _empty_result()
-
-    sidewalks_union = sidewalks_gdf.geometry.unary_union
-    if sidewalks_union.is_empty:
-        return _empty_result()
-
-    sidewalks_prepared = prep(sidewalks_union)
-
-    # Keep protoblock argument for API completeness (not yet used for filtering).
-    _ = protoblocks_gdf
-
-    tolerance = max(3, int(node_precision))
-    kerb_fraction = max(0.0, min(perc_draw_kerbs / 100.0, 0.49))
-    base_curve_radius = default_curve_radius if curve_radius is None else curve_radius
-    ray_growth_factor_local = max(ray_growth_factor, 1.1)
-    max_ray_iterations_local = max(1, int(max_ray_iterations))
-    fallback_width = float(fallback_default_width)
-    distance_tol = 1e-6
-
-    def _resolve_width(row) -> float:
-        value = row.get("width", fallback_width)
+    def _resolve_width(self, row) -> float:
+        value = row.get("width", self.fallback_width)
         try:
             value = float(value)
         except (TypeError, ValueError):
-            value = fallback_width
+            value = self.fallback_width
         if value <= 0:
-            value = fallback_width
+            value = self.fallback_width
         return value
 
-    def _node_key(coord) -> tuple[float, float]:
-        return (round(coord[0], tolerance), round(coord[1], tolerance))
+    def _node_key(self, coord) -> tuple[float, float]:
+        return (round(coord[0], self.tolerance), round(coord[1], self.tolerance))
 
-    def _iter_lines(geom):
+    def _iter_lines(self, geom):
         if geom is None or geom.is_empty:
             return
         if isinstance(geom, LineString):
@@ -890,64 +857,17 @@ def draw_crossings_gdf(
                 if part and not part.is_empty:
                     yield part
 
-    node_data: dict[tuple[float, float], dict] = {}
-    segment_info: dict[int, dict] = {}
-    segment_nodes: dict[int, dict] = {}
-
-    def _resolve_width_namedtuple(row) -> float:
-        value = getattr(row, "width", fallback_width)
+    def _resolve_width_namedtuple(self, row) -> float:
+        value = getattr(row, "width", self.fallback_width)
         try:
             value = float(value)
         except (TypeError, ValueError):
-            value = fallback_width
+            value = self.fallback_width
         if value <= 0:
-            value = fallback_width
+            value = self.fallback_width
         return value
 
-    for row in streets_gdf.itertuples():
-        idx = row.Index
-        geom = row.geometry
-        if geom is None or geom.is_empty:
-            continue
-
-        for line in _iter_lines(geom):
-            if line.length <= 0:
-                continue
-            width = _resolve_width_namedtuple(row)
-            coords = list(line.coords)
-            start = coords[0]
-            end = coords[-1]
-            segment_info[idx] = {
-                "geometry": line,
-                "width": width,
-                "start": start,
-                "end": end,
-            }
-            segment_nodes[idx] = {}
-
-            for coord, dist in ((start, 0.0), (end, line.length)):
-                key = _node_key(coord)
-                entry = node_data.setdefault(
-                    key, {"point": Point(coord), "segments": set(), "widths": []}
-                )
-                entry["segments"].add(idx)
-                entry["widths"].append(width)
-                segment_nodes[idx][(key, round(dist, 6))] = {
-                    "node_key": key,
-                    "distance": dist,
-                }
-
-    if not segment_info:
-        return _empty_result()
-
-    # Augment node data with interior intersections (handles unsplit segments)
-    segment_series = gpd.GeoSeries(
-        {idx: info["geometry"] for idx, info in segment_info.items()}, crs=crs
-    )
-    sindex = segment_series.sindex
-    pairs = sindex.query(segment_series, predicate="intersects")
-
-    def _iterate_points(geom):
+    def _iterate_points(self, geom):
         if geom.is_empty:
             return
         if isinstance(geom, Point):
@@ -972,47 +892,7 @@ def draw_crossings_gdf(
                 for coord in boundary.coords:
                     yield Point(coord)
 
-    for idx1, idx2 in zip(*pairs):
-        if idx1 >= idx2:
-            continue
-        line1 = segment_series.loc[idx1]
-        line2 = segment_series.loc[idx2]
-        try:
-            inter = line1.intersection(line2)
-        except Exception:
-            continue
-
-        for pt in _iterate_points(inter):
-            if pt.is_empty:
-                continue
-            proj1 = line1.project(pt)
-            proj2 = line2.project(pt)
-            aligned1 = line1.interpolate(proj1)
-            aligned2 = line2.interpolate(proj2)
-            key = _node_key((aligned1.x, aligned1.y))
-            entry = node_data.setdefault(
-                key, {"point": aligned1, "segments": set(), "widths": []}
-            )
-            entry["segments"].update([idx1, idx2])
-            entry["widths"].append(segment_info[idx1]["width"])
-            entry["widths"].append(segment_info[idx2]["width"])
-
-            segment_nodes[idx1][(key, round(proj1, 6))] = {
-                "node_key": key,
-                "distance": proj1,
-            }
-            segment_nodes[idx2][(key, round(proj2, 6))] = {
-                "node_key": key,
-                "distance": proj2,
-            }
-
-    for entry in node_data.values():
-        entry["degree"] = len(entry["segments"])
-        entry["major_width"] = (
-            max(entry["widths"]) if entry["widths"] else fallback_width
-        )
-
-    def _interpolate_along(
+    def _interpolate_along(self,
         line: LineString, base_distance: float, direction: int, distance: float
     ) -> Optional[Point]:
         if line.length == 0:
@@ -1027,7 +907,7 @@ def draw_crossings_gdf(
         except Exception:
             return None
 
-    def _tangent_direction(
+    def _tangent_direction(self,
         line: LineString, at_dist: float
     ) -> Optional[tuple[float, float]]:
         if line.length == 0:
@@ -1043,10 +923,10 @@ def draw_crossings_gdf(
             return None
         return (vec[0] / norm, vec[1] / norm)
 
-    def _perpendicular(vec: tuple[float, float]) -> tuple[float, float]:
+    def _perpendicular(self, vec: tuple[float, float]) -> tuple[float, float]:
         return (-vec[1], vec[0])
 
-    def _extract_hit(geom, origin: Point, tol: float = 1e-3) -> Optional[Point]:
+    def _extract_hit(self, geom, origin: Point, tol: float = 1e-3) -> Optional[Point]:
         if geom.is_empty:
             return None
 
@@ -1072,7 +952,7 @@ def draw_crossings_gdf(
             candidates = [
                 hit
                 for part in geom.geoms
-                if (hit := _extract_hit(part, origin, tol)) is not None
+                if (hit := self._extract_hit(part, origin, tol)) is not None
             ]
             if not candidates:
                 return None
@@ -1082,20 +962,20 @@ def draw_crossings_gdf(
             candidates = [
                 hit
                 for part in geom.geoms
-                if (hit := _extract_hit(part, origin, tol)) is not None
+                if (hit := self._extract_hit(part, origin, tol)) is not None
             ]
             if not candidates:
                 return None
             return min(candidates, key=lambda p: p.distance(origin))
 
         if geom.geom_type == "Polygon":
-            return _extract_hit(geom.boundary, origin, tol)
+            return self._extract_hit(geom.boundary, origin, tol)
 
         if geom.geom_type == "MultiPolygon":
             candidates = [
                 hit
                 for part in geom.geoms
-                if (hit := _extract_hit(part.boundary, origin, tol)) is not None
+                if (hit := self._extract_hit(part.boundary, origin, tol)) is not None
             ]
             if not candidates:
                 return None
@@ -1103,27 +983,27 @@ def draw_crossings_gdf(
 
         return None
 
-    def _cast_ray(
+    def _cast_ray(self,
         origin: Point, direction: tuple[float, float], base_len: float
     ) -> Optional[Point]:
         length = max(base_len, 0.5)
-        for _ in range(max_ray_iterations_local):
+        for _ in range(self.max_ray_iterations_local):
             target = Point(
                 origin.x + direction[0] * length,
                 origin.y + direction[1] * length,
             )
             ray = LineString([origin, target])
-            if not sidewalks_prepared.intersects(ray):
-                length *= ray_growth_factor_local
+            if not self.sidewalks_prepared.intersects(ray):
+                length *= self.ray_growth_factor_local
                 continue
-            hit = sidewalks_union.intersection(ray)
-            candidate = _extract_hit(hit, origin)
+            hit = self.sidewalks_union.intersection(ray)
+            candidate = self._extract_hit(hit, origin)
             if candidate is not None:
                 return candidate
-            length *= ray_growth_factor_local
+            length *= self.ray_growth_factor_local
         return None
 
-    def _build_crossing_record(
+    def _build_crossing_record(self,
         point_a: Point,
         point_e: Point,
         base_length: float,
@@ -1144,8 +1024,8 @@ def draw_crossings_gdf(
         if ac_line.length == 0 or ec_line.length == 0:
             return {}
 
-        point_b = ac_line.interpolate(ac_line.length * kerb_fraction)
-        point_d = ec_line.interpolate(ec_line.length * kerb_fraction)
+        point_b = ac_line.interpolate(ac_line.length * self.kerb_fraction)
+        point_d = ec_line.interpolate(ec_line.length * self.kerb_fraction)
 
         crossing_line = LineString(
             [
@@ -1169,6 +1049,164 @@ def draw_crossings_gdf(
             "center_offset_m": center_offset,
             "used_fallback": fallback,
         }
+
+
+def draw_crossings_gdf(
+    streets_gdf: gpd.GeoDataFrame,
+    sidewalks_gdf: Optional[gpd.GeoDataFrame] = None,
+    protoblocks_gdf: Optional[gpd.GeoDataFrame] = None,
+    *,
+    curve_radius: Optional[float] = None,
+    inward_offset: float = 1.0,
+    extra_length: float = 1.0,
+    increment_inward: float = 0.5,
+    max_crossings_iterations: int = 20,
+    abs_max_crossing_len: float = 100.0,
+    perc_tol_crossings: float = 25.0,
+    perc_draw_kerbs: float = 30.0,
+    ray_growth_factor: float = 2.0,
+    max_ray_iterations: int = 5,
+    node_precision: int = 6,
+) -> gpd.GeoDataFrame:
+    """Generate crossings following the documented Sidewalkreator procedure."""
+
+    from .parameters import default_curve_radius, fallback_default_width
+
+    crs = streets_gdf.crs if streets_gdf is not None else None
+    generator = _CrossingsGenerator()
+    generator.crs = crs
+
+
+    if streets_gdf is None or streets_gdf.empty:
+        return generator._empty_result()
+
+    if sidewalks_gdf is None or sidewalks_gdf.empty:
+        return generator._empty_result()
+
+    sidewalks_union = sidewalks_gdf.geometry.unary_union
+    generator.sidewalks_union = sidewalks_union
+    if sidewalks_union.is_empty:
+        return generator._empty_result()
+
+    sidewalks_prepared = prep(sidewalks_union)
+    generator.sidewalks_prepared = sidewalks_prepared
+
+    # Keep protoblock argument for API completeness (not yet used for filtering).
+    _ = protoblocks_gdf
+
+    tolerance = max(3, int(node_precision))
+    kerb_fraction = max(0.0, min(perc_draw_kerbs / 100.0, 0.49))
+    base_curve_radius = default_curve_radius if curve_radius is None else curve_radius
+    ray_growth_factor_local = max(ray_growth_factor, 1.1)
+    max_ray_iterations_local = max(1, int(max_ray_iterations))
+    fallback_width = float(fallback_default_width)
+    distance_tol = 1e-6
+    generator.fallback_width = fallback_width
+    generator.tolerance = tolerance
+    generator.kerb_fraction = kerb_fraction
+    generator.base_curve_radius = base_curve_radius
+    generator.ray_growth_factor_local = ray_growth_factor_local
+    generator.max_ray_iterations_local = max_ray_iterations_local
+    generator.distance_tol = distance_tol
+
+
+
+
+
+    node_data: dict[tuple[float, float], dict] = {}
+    segment_info: dict[int, dict] = {}
+    segment_nodes: dict[int, dict] = {}
+
+
+    for row in streets_gdf.itertuples():
+        idx = row.Index
+        geom = row.geometry
+        if geom is None or geom.is_empty:
+            continue
+
+        for line in generator._iter_lines(geom):
+            if line.length <= 0:
+                continue
+            width = generator._resolve_width_namedtuple(row)
+            coords = list(line.coords)
+            start = coords[0]
+            end = coords[-1]
+            segment_info[idx] = {
+                "geometry": line,
+                "width": width,
+                "start": start,
+                "end": end,
+            }
+            segment_nodes[idx] = {}
+
+            for coord, dist in ((start, 0.0), (end, line.length)):
+                key = generator._node_key(coord)
+                entry = node_data.setdefault(
+                    key, {"point": Point(coord), "segments": set(), "widths": []}
+                )
+                entry["segments"].add(idx)
+                entry["widths"].append(width)
+                segment_nodes[idx][(key, round(dist, 6))] = {
+                    "node_key": key,
+                    "distance": dist,
+                }
+
+    if not segment_info:
+        return generator._empty_result()
+
+    # Augment node data with interior intersections (handles unsplit segments)
+    segment_series = gpd.GeoSeries(
+        {idx: info["geometry"] for idx, info in segment_info.items()}, crs=crs
+    )
+    sindex = segment_series.sindex
+    pairs = sindex.query(segment_series, predicate="intersects")
+
+
+    for idx1, idx2 in zip(*pairs):
+        if idx1 >= idx2:
+            continue
+        line1 = segment_series.loc[idx1]
+        line2 = segment_series.loc[idx2]
+        try:
+            inter = line1.intersection(line2)
+        except Exception:
+            continue
+
+        for pt in generator._iterate_points(inter):
+            if pt.is_empty:
+                continue
+            proj1 = line1.project(pt)
+            proj2 = line2.project(pt)
+            aligned1 = line1.interpolate(proj1)
+            aligned2 = line2.interpolate(proj2)
+            key = generator._node_key((aligned1.x, aligned1.y))
+            entry = node_data.setdefault(
+                key, {"point": aligned1, "segments": set(), "widths": []}
+            )
+            entry["segments"].update([idx1, idx2])
+            entry["widths"].append(segment_info[idx1]["width"])
+            entry["widths"].append(segment_info[idx2]["width"])
+
+            segment_nodes[idx1][(key, round(proj1, 6))] = {
+                "node_key": key,
+                "distance": proj1,
+            }
+            segment_nodes[idx2][(key, round(proj2, 6))] = {
+                "node_key": key,
+                "distance": proj2,
+            }
+
+    for entry in node_data.values():
+        entry["degree"] = len(entry["segments"])
+        entry["major_width"] = (
+            max(entry["widths"]) if entry["widths"] else fallback_width
+        )
+
+
+
+
+
+
 
     records = []
 
@@ -1223,22 +1261,22 @@ def draw_crossings_gdf(
                 last_perp = None
 
                 while attempt < max_crossings_iterations:
-                    center = _interpolate_along(
+                    center = generator._interpolate_along(
                         line, base_distance, direction, current_inward
                     )
                     if center is None:
                         break
 
                     distance_along = line.project(center)
-                    tangent = _tangent_direction(line, distance_along)
+                    tangent = generator._tangent_direction(line, distance_along)
                     if tangent is None:
                         break
-                    perp = _perpendicular(tangent)
+                    perp = generator._perpendicular(tangent)
                     last_center = center
                     last_perp = perp
 
-                    point_a = _cast_ray(center, perp, base_length)
-                    point_e = _cast_ray(center, (-perp[0], -perp[1]), base_length)
+                    point_a = generator._cast_ray(center, perp, base_length)
+                    point_e = generator._cast_ray(center, (-perp[0], -perp[1]), base_length)
 
                     if point_a is None or point_e is None:
                         attempt += 1
@@ -1258,7 +1296,7 @@ def draw_crossings_gdf(
                                 center.x - perp[0] * half,
                                 center.y - perp[1] * half,
                             )
-                            record = _build_crossing_record(
+                            record = generator._build_crossing_record(
                                 fallback_a,
                                 fallback_e,
                                 base_length,
@@ -1284,7 +1322,7 @@ def draw_crossings_gdf(
                         break
 
                     if crossing_length <= max_allowed:
-                        record = _build_crossing_record(
+                        record = generator._build_crossing_record(
                             point_a,
                             point_e,
                             base_length,
@@ -1319,7 +1357,7 @@ def draw_crossings_gdf(
                         last_center.x - last_perp[0] * half,
                         last_center.y - last_perp[1] * half,
                     )
-                    record = _build_crossing_record(
+                    record = generator._build_crossing_record(
                         fallback_a,
                         fallback_e,
                         base_length,
@@ -1335,7 +1373,7 @@ def draw_crossings_gdf(
                 processed_dirs.add(dir_key)
 
     if not records:
-        return _empty_result()
+        return generator._empty_result()
 
     return gpd.GeoDataFrame(records, geometry="geometry", crs=crs)
 
