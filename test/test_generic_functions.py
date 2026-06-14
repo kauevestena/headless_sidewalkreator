@@ -1,6 +1,10 @@
 import math
+from pyproj.exceptions import CRSError
 import pytest
 import geopandas as gpd
+
+
+
 from shapely.geometry import LineString, Polygon, Point
 from unittest.mock import patch, MagicMock
 
@@ -24,6 +28,7 @@ from headless_sidewalkreator.generic_functions import (
     bbox_to_gdf,
     calculate_tangent_direction,
     calculate_sidewalk_properties,
+    reproject_gdf,
 )
 from headless_sidewalkreator.parameters import default_widths, fallback_default_width
 
