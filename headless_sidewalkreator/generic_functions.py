@@ -8,6 +8,7 @@ transforming geospatial data using GeoPandas and other related libraries.
 import math
 import geopandas as gpd
 from typing import Optional
+import shapely
 from shapely.geometry import (
     LineString,
     MultiLineString,
@@ -1677,7 +1678,12 @@ def clean_geometries_gdf(
         # Simplify geometry
         simplified_geom = valid_geom.simplify(tolerance)
 
-        cleaned_geometries.append(simplified_geom)
+        # Snap geometry to grid
+        snapped_geom = shapely.set_precision(simplified_geom, tolerance)
+
+        # set_precision can result in empty geometries if they collapse
+        if not snapped_geom.is_empty:
+            cleaned_geometries.append(snapped_geom)
 
     return gpd.GeoDataFrame(geometry=cleaned_geometries, crs=gdf.crs)
 
