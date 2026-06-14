@@ -1,6 +1,10 @@
 import math
+from pyproj.exceptions import CRSError
 import pytest
 import geopandas as gpd
+
+
+
 from shapely.geometry import LineString, Polygon, Point
 from unittest.mock import patch, MagicMock
 
@@ -24,6 +28,7 @@ from headless_sidewalkreator.generic_functions import (
     bbox_to_gdf,
     calculate_tangent_direction,
     calculate_sidewalk_properties,
+    reproject_gdf,
 )
 from headless_sidewalkreator.parameters import default_widths, fallback_default_width
 
@@ -495,3 +500,43 @@ def test_calculate_sidewalk_properties_point():
 
     assert result_gdf["area"].iloc[0] == 0.0
     assert result_gdf["perimeter"].iloc[0] == 0.0
+
+
+
+
+
+def test_reproject_gdf_happy_path():
+    """Test reprojecting a GeoDataFrame from EPSG:4326 to EPSG:3857."""
+    gdf = gpd.GeoDataFrame({"geometry": [Point(1, 1)]}, crs="EPSG:4326")
+    reprojected_gdf = reproject_gdf(gdf, "EPSG:3857")
+
+    assert reprojected_gdf.crs.to_string() == "EPSG:3857"
+    assert len(reprojected_gdf) == 1
+
+    # 1,1 in 4326 is approx 111319.49, 111325.14 in 3857
+    point = reprojected_gdf.geometry.iloc[0]
+    assert point.x == pytest.approx(111319.49, rel=1e-5)
+    assert point.y == pytest.approx(111325.14, rel=1e-5)
+
+def test_reproject_gdf_empty():
+    """Test reprojecting an empty GeoDataFrame."""
+    gdf = gpd.GeoDataFrame({"geometry": []}, crs="EPSG:4326")
+    reprojected_gdf = reproject_gdf(gdf, "EPSG:3857")
+
+    assert reprojected_gdf.empty
+    assert reprojected_gdf.crs.to_string() == "EPSG:3857"
+
+def test_reproject_gdf_same_crs():
+    """Test reprojecting to the same CRS."""
+    gdf = gpd.GeoDataFrame({"geometry": [Point(1, 1)]}, crs="EPSG:4326")
+    reprojected_gdf = reproject_gdf(gdf, "EPSG:4326")
+
+    assert reprojected_gdf.crs.to_string() == "EPSG:4326"
+    assert reprojected_gdf.geometry.iloc[0].x == 1.0
+    assert reprojected_gdf.geometry.iloc[0].y == 1.0
+
+def test_reproject_gdf_invalid_crs():
+    """Test reprojecting with an invalid CRS raises CRSError."""
+    gdf = gpd.GeoDataFrame({"geometry": [Point(1, 1)]}, crs="EPSG:4326")
+    with pytest.raises(CRSError):
+        reproject_gdf(gdf, "INVALID_CRS")
