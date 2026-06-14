@@ -539,8 +539,8 @@ def handle_sidewalk_tags(
             # Vectorized offset and buffer
             road_widths = side_streets.get("width", 6.0)
             buffer_distances = road_widths / 2
-            offset_lines = side_streets.geometry.parallel_offset(
-                buffer_distances, side, join_style=2
+            offset_lines = side_streets.geometry.offset_curve(
+                buffer_distances if side == "left" else -buffer_distances, join_style=2
             )
             exclusion_geometries.extend(offset_lines.buffer(1.0))
 
