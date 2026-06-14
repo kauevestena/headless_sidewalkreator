@@ -105,39 +105,33 @@ def create_merged_output(output_directory, sidewalks_gdf, crossings_gdf, kerbs_g
     all features for easy uploading to OpenStreetMap.
     """
     merged_features = []
+    sidewalk_count = 0
+    crossing_count = 0
 
     # Add sidewalks as lines
     if sidewalks_gdf is not None and not sidewalks_gdf.empty:
         sidewalks_4326 = sidewalks_gdf.to_crs("EPSG:4326")
-        for geom in sidewalks_4326.geometry:
-            feature = {
-                "type": "Feature",
-                "properties": {"highway": "footway", "footway": "sidewalk"},
-                "geometry": geom.__geo_interface__
-            }
-            merged_features.append(feature)
+        features_gdf = sidewalks_4326[[sidewalks_4326.geometry.name]].copy()
+        features_gdf["highway"] = "footway"
+        features_gdf["footway"] = "sidewalk"
+        merged_features.extend(features_gdf.__geo_interface__["features"])
+        sidewalk_count = len(features_gdf)
 
     # Add crossings as lines
     if crossings_gdf is not None and not crossings_gdf.empty:
         crossings_4326 = crossings_gdf.to_crs("EPSG:4326")
-        for geom in crossings_4326.geometry:
-            feature = {
-                "type": "Feature",
-                "properties": {"highway": "footway", "footway": "crossing"},
-                "geometry": geom.__geo_interface__
-            }
-            merged_features.append(feature)
+        features_gdf = crossings_4326[[crossings_4326.geometry.name]].copy()
+        features_gdf["highway"] = "footway"
+        features_gdf["footway"] = "crossing"
+        merged_features.extend(features_gdf.__geo_interface__["features"])
+        crossing_count = len(features_gdf)
 
     # Add kerbs as points
     if kerbs_gdf is not None and not kerbs_gdf.empty:
         kerbs_4326 = kerbs_gdf.to_crs("EPSG:4326")
-        for geom in kerbs_4326.geometry:
-            feature = {
-                "type": "Feature",
-                "properties": {"barrier": "kerb"},
-                "geometry": geom.__geo_interface__
-            }
-            merged_features.append(feature)
+        features_gdf = kerbs_4326[[kerbs_4326.geometry.name]].copy()
+        features_gdf["barrier"] = "kerb"
+        merged_features.extend(features_gdf.__geo_interface__["features"])
 
     # Create merged GeoJSON
     merged_geojson = {
@@ -154,8 +148,8 @@ def create_merged_output(output_directory, sidewalks_gdf, crossings_gdf, kerbs_g
     comment_path = os.path.join(output_directory, "changeset_comment.txt")
     with open(comment_path, 'w') as f:
         f.write("Generated sidewalks, crossings, and kerbs using OSM SidewalKreator\n")
-        f.write(f"Added {len([f for f in merged_features if f['properties'].get('footway') == 'sidewalk'])} sidewalk segments\n")
-        f.write(f"Added {len([f for f in merged_features if f['properties'].get('footway') == 'crossing'])} crossings\n")
+        f.write(f"Added {sidewalk_count} sidewalk segments\n")
+        f.write(f"Added {crossing_count} crossings\n")
 
 
 def main():
