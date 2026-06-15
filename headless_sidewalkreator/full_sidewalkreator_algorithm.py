@@ -5,6 +5,7 @@ This module exposes the sidewalkreator function - the modern GeoDataFrame-based 
 
 import geopandas as gpd
 import osmnx as ox
+from shapely.geometry import Polygon
 from .generic_functions import (
     get_bbox_from_gdf,
     bbox_to_gdf,
@@ -132,7 +133,24 @@ def generate_protoblocks(
     # save_debug_layer(splitted_gdf, "protoblocks_splitted_lines")
 
     # 8. Create protoblocks from polygonizing
-    protoblocks_gdf = polygonize_lines_gdf(splitted_gdf)
+
+    # We pass the bounding box of the original input geometry, represented as a polygon
+    # so that the bounding box edges are closed properly.
+    if input_gdf is not None and not input_gdf.empty:
+        # Create a bounding box polygon using the bounds of the input geometry
+        bbox_bounds = input_gdf.total_bounds
+        bbox_poly = Polygon([
+            (bbox_bounds[0], bbox_bounds[1]),
+            (bbox_bounds[2], bbox_bounds[1]),
+            (bbox_bounds[2], bbox_bounds[3]),
+            (bbox_bounds[0], bbox_bounds[3]),
+            (bbox_bounds[0], bbox_bounds[1])
+        ])
+        clip_geom = gpd.GeoDataFrame(geometry=[bbox_poly], crs=input_gdf.crs)
+    else:
+        clip_geom = None
+
+    protoblocks_gdf = polygonize_lines_gdf(splitted_gdf, clip_geom=clip_geom)
     logger.info("Step 8 complete")
     logger.info("Protoblocks generation complete")
     return protoblocks_gdf
@@ -270,7 +288,20 @@ def sidewalkreator(
     # # #     parameters=parameters,
     # # # )
     # generate protoblocks with "polygonize_lines_gdf", since there's no meaning in downloading everything twice
-    protoblocks_gdf = polygonize_lines_gdf(splitted_gdf)
+    if input_gdf is not None and not input_gdf.empty:
+        bbox_bounds = input_gdf.total_bounds
+        bbox_poly = Polygon([
+            (bbox_bounds[0], bbox_bounds[1]),
+            (bbox_bounds[2], bbox_bounds[1]),
+            (bbox_bounds[2], bbox_bounds[3]),
+            (bbox_bounds[0], bbox_bounds[3]),
+            (bbox_bounds[0], bbox_bounds[1])
+        ])
+        clip_geom = gpd.GeoDataFrame(geometry=[bbox_poly], crs=input_gdf.crs)
+    else:
+        clip_geom = None
+
+    protoblocks_gdf = polygonize_lines_gdf(splitted_gdf, clip_geom=clip_geom)
 
     logger.info("Step 8 complete")
 

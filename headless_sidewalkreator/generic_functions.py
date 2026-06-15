@@ -211,67 +211,76 @@ def reproject_gdf(gdf: gpd.GeoDataFrame, target_crs: str) -> gpd.GeoDataFrame:
 from shapely.ops import polygonize, polygonize_full
 
 
-def polygonize_lines_gdf(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+def polygonize_lines_gdf(gdf: gpd.GeoDataFrame, clip_geom: gpd.GeoDataFrame = None) -> gpd.GeoDataFrame:
     """Polygonizes lines in a GeoDataFrame.
 
     This function takes a GeoDataFrame of lines and creates polygons from them.
 
     Args:
         gdf: A GeoDataFrame containing LineString geometries.
+        clip_geom: An optional GeoDataFrame containing the clipping geometry to close edge blocks.
 
     Returns:
         A new GeoDataFrame containing the polygonized geometries.
     """
-    lines = [geom for geom in gdf.geometry]
+    lines = [geom for geom in gdf.geometry if geom is not None and not geom.is_empty]
     logger.info("Number of lines to polygonize: %s", len(lines))
 
-    # First attempt: direct polygonize from the input lines
-    polygons = list(polygonize(lines))
+    if not lines:
+        return gpd.GeoDataFrame(geometry=[], crs=gdf.crs)
+
+    # To ensure QGIS native:polygonize parity and close edge blocks,
+    # we append the clipping boundary exterior to the lines network before polygonizing.
+    if clip_geom is not None and not clip_geom.empty:
+        # Reproject clip_geom to match gdf CRS if necessary
+        if clip_geom.crs != gdf.crs:
+            clip_geom = clip_geom.to_crs(gdf.crs)
+
+        clip_geom_union = clip_geom.geometry.union_all()
+        if clip_geom_union.geom_type in ['Polygon', 'MultiPolygon']:
+            if clip_geom_union.geom_type == 'Polygon':
+                lines.append(clip_geom_union.exterior)
+                for interior in clip_geom_union.interiors:
+                    lines.append(interior)
+            else:
+                for poly in clip_geom_union.geoms:
+                    lines.append(poly.exterior)
+                    for interior in poly.interiors:
+                        lines.append(interior)
+
+    # Noding lines via union_all
+    merged_lines = gpd.GeoSeries(lines, crs=gdf.crs).union_all()
+
+    # Try polygonize on the noded geometry
+    polygons = list(polygonize(merged_lines))
     logger.info("Number of polygons found: %s", len(polygons))
 
-    # If no polygons found, try more robust strategies without creating a
-    # convex hull fallback that would mask real block structure.
-    if not polygons and lines:
-        # Try to close tiny gaps by snapping coordinates to a grid. This is a
-        # deterministic, low-risk operation that helps polygonize find closed
-        # rings when endpoints are nearly identical but have tiny floating
-        # differences. Round to 6 decimal places which is sufficient for our
-        # test fixtures and typical projected coordinates.
-        snapped_lines = []
-        for ln in lines:
-            if ln is None or ln.is_empty:
-                continue
-            if ln.geom_type == "LineString":
-                snapped_coords = [(round(c[0], 6), round(c[1], 6)) for c in ln.coords]
-                snapped_lines.append(LineString(snapped_coords))
-            elif ln.geom_type == "MultiLineString":
-                for part in ln.geoms:
-                    snapped_coords = [
-                        (round(c[0], 6), round(c[1], 6)) for c in part.coords
-                    ]
-                    snapped_lines.append(LineString(snapped_coords))
-
-        # Attempt polygonize on snapped lines
+    if not polygons:
+        # Use polygonize_full to get polygons even when dangles/cuts exist
         try:
-            polygons = list(polygonize(snapped_lines))
+            polys, dangles, cuts, invalids = polygonize_full(merged_lines)
+            polygons = list(polys)
         except Exception:
             polygons = []
 
-        if not polygons:
-            merged = gpd.GeoSeries(snapped_lines, crs=gdf.crs).unary_union
-            # Try polygonize on the merged geometry (may close gaps)
-            try:
-                polygons = list(polygonize(merged))
-            except Exception:
-                polygons = []
+    # If we added the bounding box exterior, we must remove the "outside" polygon
+    # that is formed by the bounding box and the lines, as well as ensure we only
+    # keep polygons within the bounding box area.
+    if polygons and clip_geom is not None and not clip_geom.empty:
+        clip_geom_union = clip_geom.geometry.union_all()
 
-        if not polygons:
-            # Use polygonize_full to get polygons even when dangles/cuts exist
-            try:
-                polys, dangles, cuts, invalids = polygonize_full(merged)
-                polygons = list(polys)
-            except Exception:
-                polygons = []
+        # Buffer slightly to account for boundary intersection differences since
+        # geometries were constructed mathematically and may be imperfect.
+        clip_geom_buffered = clip_geom_union.buffer(1e-5)
+
+        filtered_polygons = []
+        for poly in polygons:
+            # Check if the polygon is inside the clipping area
+            # We use an interior point to be robust against boundary precision issues
+            repr_pt = poly.representative_point()
+            if clip_geom_buffered.contains(repr_pt) or clip_geom_buffered.intersects(repr_pt):
+                filtered_polygons.append(poly)
+        polygons = filtered_polygons
 
     gdf_poly = gpd.GeoDataFrame(geometry=polygons)
     gdf_poly = gdf_poly.set_crs(gdf.crs)
@@ -345,68 +354,29 @@ def split_lines_at_intersections(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     Returns:
         A new GeoDataFrame containing the split line segments.
     """
-    # Find all intersections
-    intersections = gdf.sindex.query(gdf.geometry, predicate="intersects")
+    if gdf.empty:
+        return gdf.copy()
 
-    split_points = []
-    logger.info("Number of intersections found: %s", len(intersections[0]))
-    for i in range(len(intersections[0])):
-        idx1 = intersections[0][i]
-        idx2 = intersections[1][i]
-        if idx1 >= idx2:
-            continue
-        line1 = gdf.geometry.iloc[idx1]
-        line2 = gdf.geometry.iloc[idx2]
-        intersection = line1.intersection(line2)
-        if intersection.geom_type == "Point":
-            split_points.append(intersection)
-        elif intersection.geom_type == "MultiPoint":
-            split_points.extend(list(intersection.geoms))
+    # Leverage shapely's robust noding via union_all to accurately split lines
+    # at all self-intersections and intersections between different lines.
+    merged = gdf.geometry.union_all()
 
-    # Split the lines
+    # Extract the resulting LineStrings
     new_lines = []
-    distance_tol = 1e-6
-    for line in gdf.geometry:
-        if line is None or line.is_empty:
-            continue
+    if merged.geom_type == 'LineString':
+        new_lines.append(merged)
+    elif merged.geom_type == 'MultiLineString':
+        new_lines.extend(list(merged.geoms))
+    elif merged.geom_type == 'GeometryCollection':
+        for geom in merged.geoms:
+            if geom.geom_type == 'LineString':
+                new_lines.append(geom)
+            elif geom.geom_type == 'MultiLineString':
+                new_lines.extend(list(geom.geoms))
 
-        seen = set()
-        points_on_line = []
-        for p in split_points:
-            if line.distance(p) <= distance_tol:
-                proj = line.project(p)
-                aligned_point = line.interpolate(proj)
-                key = (round(aligned_point.x, 6), round(aligned_point.y, 6))
-                if key not in seen:
-                    seen.add(key)
-                    points_on_line.append(aligned_point)
-
-        if points_on_line:
-            distances = [0.0, line.length]
-            for pt in points_on_line:
-                dist = line.project(pt)
-                if dist > distance_tol and (line.length - dist) > distance_tol:
-                    distances.append(dist)
-
-            # Deduplicate and sort distances
-            distances = sorted(set(round(d, 6) for d in distances))
-
-            segments = []
-            for start_d, end_d in zip(distances[:-1], distances[1:]):
-                if end_d - start_d <= distance_tol:
-                    continue
-                segment = substring(line, start_d, end_d)
-                if segment.is_empty or segment.length <= distance_tol:
-                    continue
-                segments.append(segment)
-
-            if segments:
-                new_lines.extend(segments)
-            else:
-                new_lines.append(line)
-        else:
-            new_lines.append(line)
-
+    # Optional: we could drop empty lines or do additional cleanup, but union_all
+    # generally produces a clean set of LineStrings.
+    new_lines = [geom for geom in new_lines if not geom.is_empty]
     return gpd.GeoDataFrame(geometry=new_lines, crs=gdf.crs)
 
 

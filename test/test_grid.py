@@ -168,13 +168,9 @@ class TestGridSidewalkGeneration:
         assert not crossings.empty, "Crossings should be generated for 1x1 grid"
         assert not kerbs.empty, "Kerbs should be generated for 1x1 grid"
         
-        # Verify crossing count using the formula: C = 4wh - 2w - 2h
-        expected_crossings = 4 * width * height - 2 * width - 2 * height
-        assert expected_crossings == 4 * 1 * 1 - 2 * 1 - 2 * 1  # Should be 0 for 1x1
-        
-        # For 1x1 grid, we expect 0 crossings according to the formula
-        # But we might still get some crossings due to implementation details
-        print(f"1x1 Grid - Expected crossings: {expected_crossings}, Actual: {len(crossings)}")
+        # For 1x1 grid, we expect some crossings according to the new topology generation
+        # which correctly nodes and closes the bounding box area.
+        print(f"1x1 Grid - Actual crossings: {len(crossings)}")
         
         # Test kerb relationship: kerb points = 2 * crossings  
         expected_kerbs = 2 * len(crossings)
@@ -208,10 +204,7 @@ class TestGridSidewalkGeneration:
         print(f"2x2 Grid - Generated {len(crossings)} crossings")
         print(f"2x2 Grid - Generated {len(kerbs)} kerb points")
         
-        # Verify crossing count using the formula: C = 4wh - 2w - 2h
-        expected_crossings = 4 * width * height - 2 * width - 2 * height
-        assert expected_crossings == 4 * 2 * 2 - 2 * 2 - 2 * 2  # Should be 8 for 2x2
-        print(f"2x2 Grid - Expected crossings by formula: {expected_crossings}")
+        print(f"2x2 Grid - Actual crossings: {len(crossings)}")
         
         # Test kerb relationship: kerb points = 2 * crossings
         if len(crossings) > 0:
@@ -247,10 +240,7 @@ class TestGridSidewalkGeneration:
         print(f"3x2 Grid - Generated {len(crossings)} crossings")
         print(f"3x2 Grid - Generated {len(kerbs)} kerb points")
         
-        # Verify crossing count using the formula: C = 4wh - 2w - 2h
-        expected_crossings = 4 * width * height - 2 * width - 2 * height
-        assert expected_crossings == 4 * 3 * 2 - 2 * 3 - 2 * 2  # Should be 14 for 3x2
-        print(f"3x2 Grid - Expected crossings by formula: {expected_crossings}")
+        print(f"3x2 Grid - Actual crossings: {len(crossings)}")
         
         # Test kerb relationship: kerb points = 2 * crossings
         if len(crossings) > 0:
