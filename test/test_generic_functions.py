@@ -214,6 +214,38 @@ def test_split_sidewalks_by_max_length():
     splitted_gdf = split_sidewalks_by_max_length(sidewalks_gdf, max_length=2)
     assert len(splitted_gdf) == 5
 
+def test_split_sidewalks_by_max_length_short_line():
+    """Test split_sidewalks_by_max_length with a line shorter than max_length."""
+    line = LineString([(0,0), (5,0)])
+    sidewalks_gdf = gpd.GeoDataFrame(geometry=[line], crs="EPSG:3857")
+
+    splitted_gdf = split_sidewalks_by_max_length(sidewalks_gdf, max_length=10)
+    assert len(splitted_gdf) == 1
+    assert splitted_gdf.geometry.iloc[0].equals(line)
+
+def test_split_sidewalks_by_max_length_large_max_length():
+    """Test split_sidewalks_by_max_length with an extremely large max_length."""
+    line = LineString([(0,0), (10,0)])
+    sidewalks_gdf = gpd.GeoDataFrame(geometry=[line], crs="EPSG:3857")
+
+    splitted_gdf = split_sidewalks_by_max_length(sidewalks_gdf, max_length=1e9)
+    assert len(splitted_gdf) == 1
+    assert splitted_gdf.geometry.iloc[0].equals(line)
+
+def test_split_sidewalks_by_max_length_invalid_geometry():
+    """Test split_sidewalks_by_max_length with invalid geometry."""
+    sidewalks_gdf = gpd.GeoDataFrame(geometry=[Point(0, 0)], crs="EPSG:3857")
+
+    splitted_gdf = split_sidewalks_by_max_length(sidewalks_gdf, max_length=10)
+    assert len(splitted_gdf) == 1
+
+def test_split_sidewalks_by_max_length_empty_input():
+    """Test split_sidewalks_by_max_length with empty GeoDataFrame."""
+    sidewalks_gdf = gpd.GeoDataFrame(geometry=[], crs="EPSG:3857")
+
+    splitted_gdf = split_sidewalks_by_max_length(sidewalks_gdf, max_length=10)
+    assert splitted_gdf.empty
+
 def test_split_sidewalks_by_num_segments():
     """Test split_sidewalks_by_num_segments."""
     line = LineString([(0,0), (10,0)])
