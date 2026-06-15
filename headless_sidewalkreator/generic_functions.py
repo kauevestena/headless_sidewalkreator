@@ -1416,7 +1416,7 @@ def split_sidewalks_by_voronoi(
 
     try:
         vor = Voronoi(points)
-    except Exception as e:
+    except Exception:
         # Voronoi computation failed, return original sidewalks
         return sidewalks_gdf
 
@@ -1427,7 +1427,7 @@ def split_sidewalks_by_voronoi(
             for line in vor.ridge_vertices
             if -1 not in line
         ]
-    except Exception as e:
+    except Exception:
         return sidewalks_gdf
 
     if not lines:
@@ -1469,7 +1469,7 @@ def split_sidewalks_by_voronoi(
                     # Successfully split - use the split result for next iteration
                     splittable_geom = split_result
                     break
-            except Exception as e:
+            except Exception:
                 # Split failed, but continue with other lines
                 continue
 
@@ -1636,7 +1636,7 @@ def split_sidewalks_by_max_length(
                         new_sidewalks.append(new_sidewalk_parts)
                 else:
                     new_sidewalks.append(sidewalk)
-            except Exception as e:
+            except Exception:
                 # If splitting fails, keep the original geometry
                 new_sidewalks.append(sidewalk)
         else:
