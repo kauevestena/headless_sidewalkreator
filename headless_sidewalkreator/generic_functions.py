@@ -1440,16 +1440,13 @@ def split_sidewalks_by_protoblock_corners(
     if protoblocks_gdf.empty:
         return sidewalks_gdf
 
-    # Get all protoblock corners
-    corners = []
-    for protoblock in protoblocks_gdf.geometry:
-        # Handle both Polygon and MultiPolygon geometries
-        if protoblock.geom_type == "Polygon":
-            corners.extend(list(protoblock.exterior.coords))
-        elif protoblock.geom_type == "MultiPolygon":
-            # For MultiPolygon, iterate through each polygon
-            for poly in protoblock.geoms:
-                corners.extend(list(poly.exterior.coords))
+    # Get all protoblock corners using vectorized operations
+    # Explode MultiPolygons into Polygons, then get exterior coordinates
+    corners = (
+        protoblocks_gdf.geometry.explode(index_parts=True)
+        .exterior.get_coordinates()
+        .values
+    )
 
     # Create a single MultiPoint geometry of all the corners
     splitter = MultiPoint(corners)
