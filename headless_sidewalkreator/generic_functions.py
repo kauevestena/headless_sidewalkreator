@@ -7,7 +7,7 @@ transforming geospatial data using GeoPandas and other related libraries.
 
 import math
 import geopandas as gpd
-from typing import Optional
+from typing import Optional, List, Tuple
 import shapely
 from shapely.geometry import (
     LineString,
@@ -1371,7 +1371,86 @@ def draw_crossings_gdf(
     return gpd.GeoDataFrame(records, geometry="geometry", crs=crs)
 
 
-from scipy.spatial import Voronoi
+from scipy.spatial import Voronoi, QhullError
+from shapely.errors import GEOSException
+
+
+def _get_voronoi_points(pois_gdf: gpd.GeoDataFrame) -> List[Tuple[float, float]]:
+    def get_point_coords(geom):
+        if geom.geom_type == "Point":
+            return (geom.x, geom.y)
+        else:
+            centroid = geom.centroid
+            return (centroid.x, centroid.y)
+
+    return pois_gdf.geometry.apply(get_point_coords).tolist()
+
+
+def _create_voronoi_lines_gdf(points: List[Tuple[float, float]], crs) -> gpd.GeoDataFrame:
+    try:
+        vor = Voronoi(points)
+    except (QhullError, ValueError):
+        return gpd.GeoDataFrame(geometry=[], crs=crs)
+
+    try:
+        lines = [
+            LineString(vor.vertices[line])
+            for line in vor.ridge_vertices
+            if -1 not in line
+        ]
+    except (GEOSException, ValueError):
+        return gpd.GeoDataFrame(geometry=[], crs=crs)
+
+    if not lines:
+        return gpd.GeoDataFrame(geometry=[], crs=crs)
+
+    return gpd.GeoDataFrame(geometry=lines, crs=crs)
+
+
+def _split_single_sidewalk(sidewalk, voronoi_lines_gdf: gpd.GeoDataFrame) -> List:
+    if sidewalk is None or sidewalk.is_empty:
+        return []
+
+    # For line geometries, use the boundary; for other types, use as-is
+    if sidewalk.geom_type in ["LineString", "MultiLineString"]:
+        splittable_geom = sidewalk
+    elif sidewalk.geom_type in ["Polygon", "MultiPolygon"]:
+        splittable_geom = sidewalk.boundary
+    else:
+        # Skip unsupported geometry types
+        return []
+
+    # Skip if the splittable geometry is empty or invalid
+    if splittable_geom.is_empty or not splittable_geom.is_valid:
+        return []
+
+    # Avoid potentially hanging union_all operation - split by individual lines instead
+    for voronoi_line in voronoi_lines_gdf.geometry:
+        if voronoi_line.is_empty or not voronoi_line.is_valid:
+            continue
+
+        try:
+            # Split by this individual line
+            split_result = split(splittable_geom, voronoi_line)
+            if hasattr(split_result, "geoms") and len(split_result.geoms) > 1:
+                # Successfully split - use the split result for next iteration
+                splittable_geom = split_result
+                break
+        except (GEOSException, ValueError, TypeError, AttributeError):
+            # Split failed, but continue with other lines
+            continue
+
+    # Add final geometry to results
+    new_segments = []
+    if hasattr(splittable_geom, "geoms"):
+        for part in splittable_geom.geoms:
+            if not part.is_empty:
+                new_segments.append(part)
+    else:
+        if not splittable_geom.is_empty:
+            new_segments.append(splittable_geom)
+
+    return new_segments
 
 
 def split_sidewalks_by_voronoi(
@@ -1392,88 +1471,20 @@ def split_sidewalks_by_voronoi(
     if pois_gdf.empty:
         return sidewalks_gdf
 
-    # Create Voronoi polygons - need at least 4 points for 2D Voronoi
-    # Extract points, converting polygons to centroids
-    def get_point_coords(geom):
-        if geom.geom_type == "Point":
-            return (geom.x, geom.y)
-        else:
-            # For polygons or other geometries, use centroid
-            centroid = geom.centroid
-            return (centroid.x, centroid.y)
-
-    points = pois_gdf.geometry.apply(get_point_coords).tolist()
+    points = _get_voronoi_points(pois_gdf)
     if len(points) < 4:
         # Not enough points for Voronoi diagram, return original sidewalks
         return sidewalks_gdf
 
-    try:
-        vor = Voronoi(points)
-    except Exception:
-        # Voronoi computation failed, return original sidewalks
+    voronoi_lines_gdf = _create_voronoi_lines_gdf(points, sidewalks_gdf.crs)
+    if voronoi_lines_gdf.empty:
         return sidewalks_gdf
-
-    # Convert Voronoi polygons to shapely Polygons
-    try:
-        lines = [
-            LineString(vor.vertices[line])
-            for line in vor.ridge_vertices
-            if -1 not in line
-        ]
-    except Exception:
-        return sidewalks_gdf
-
-    if not lines:
-        # No valid Voronoi lines generated
-        return sidewalks_gdf
-
-    # Create a GeoDataFrame of the Voronoi lines
-    voronoi_lines_gdf = gpd.GeoDataFrame(geometry=lines, crs=sidewalks_gdf.crs)
 
     # Split the sidewalks by the Voronoi lines
     new_sidewalks = []
     for sidewalk in sidewalks_gdf.geometry:
-        # Skip invalid or empty geometries
-        if sidewalk is None or sidewalk.is_empty:
-            continue
-
-        # For line geometries, use the boundary; for other types, use as-is
-        if sidewalk.geom_type in ["LineString", "MultiLineString"]:
-            splittable_geom = sidewalk
-        elif sidewalk.geom_type in ["Polygon", "MultiPolygon"]:
-            splittable_geom = sidewalk.boundary
-        else:
-            # Skip unsupported geometry types
-            continue
-
-        # Skip if the splittable geometry is empty or invalid
-        if splittable_geom.is_empty or not splittable_geom.is_valid:
-            continue
-
-        # Avoid potentially hanging union_all operation - split by individual lines instead
-        for voronoi_line in voronoi_lines_gdf.geometry:
-            if voronoi_line.is_empty or not voronoi_line.is_valid:
-                continue
-
-            try:
-                # Split by this individual line
-                split_result = split(splittable_geom, voronoi_line)
-                if hasattr(split_result, "geoms") and len(split_result.geoms) > 1:
-                    # Successfully split - use the split result for next iteration
-                    splittable_geom = split_result
-                    break
-            except Exception:
-                # Split failed, but continue with other lines
-                continue
-
-        # Add final geometry to results
-        if hasattr(splittable_geom, "geoms"):
-            for part in splittable_geom.geoms:
-                if not part.is_empty:
-                    new_sidewalks.append(part)
-        else:
-            if not splittable_geom.is_empty:
-                new_sidewalks.append(splittable_geom)
+        segments = _split_single_sidewalk(sidewalk, voronoi_lines_gdf)
+        new_sidewalks.extend(segments)
 
     if not new_sidewalks:
         # No valid splits produced, return original
