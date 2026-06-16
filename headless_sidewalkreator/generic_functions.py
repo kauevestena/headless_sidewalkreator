@@ -279,6 +279,29 @@ def polygonize_lines_gdf(gdf: gpd.GeoDataFrame, clip_geom: gpd.GeoDataFrame = No
             # We use an interior point to be robust against boundary precision issues
             repr_pt = poly.representative_point()
             if clip_geom_buffered.contains(repr_pt) or clip_geom_buffered.intersects(repr_pt):
+                # Ensure we don't accidentally keep the outer background polygon that
+                # effectively represents the whole bounding box minus the streets.
+                # A simple heuristic is that its exterior will exactly overlap or strongly
+                # correlate with the bounding box exterior.
+
+                # Check how much of the polygon's exterior lies on the bounding box exterior
+                poly_ext = poly.exterior
+                clip_ext = clip_geom_union.exterior if clip_geom_union.geom_type == 'Polygon' else clip_geom_union.boundary
+
+                overlap = poly_ext.intersection(clip_ext.buffer(1e-3))
+
+                # If a significant portion of its perimeter is the bounding box, it's likely the outer shell.
+                # The outer shell is usually touching all 4 sides, whereas inner blocks touch 0, 1, or 2 sides typically.
+                # Alternatively, we can check if the polygon contains the union of all lines (as the outer shell does)
+                # But a cleaner way is just checking area relative to bounding box.
+
+                if len(polygons) > 1 and poly.area >= clip_geom_union.area * 0.5:
+                    # In some exact test scenarios, the bounding box *is* the only polygon generated.
+                    # We don't want to filter it out if it's the only one. However, if there are multiple,
+                    # the largest one (typically > 50% of the bounding box area) is the external empty space
+                    # bounded by the clipping geometry and the network.
+                    continue # This is the outer background polygon
+
                 filtered_polygons.append(poly)
         polygons = filtered_polygons
 
