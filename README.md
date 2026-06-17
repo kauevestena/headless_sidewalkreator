@@ -104,7 +104,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 
 # upgrade pip and build tools
-pip install --upgrade pip setuptools wheel
+python -m pip install --upgrade pip setuptools wheel
 ```
 
 2. Install all dependencies:
@@ -146,7 +146,7 @@ To install the package in editable/development mode:
 pip install -e .
 
 # then you can import the package in Python
-python -c "from headless_sidewalkreator import run_headless; print(run_headless.__doc__)"
+python -c "from headless_sidewalkreator import sidewalkreator; print(sidewalkreator.__doc__)"
 ```
 
 ## Notes
@@ -162,4 +162,3 @@ these steps.
 This is the headless version of a QGIS Plugin called OSM Sidewalkreator, available at:
 
 https://github.com/kauevestena/osm_sidewalkreator
-
