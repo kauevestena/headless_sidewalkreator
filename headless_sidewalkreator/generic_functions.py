@@ -1076,7 +1076,7 @@ def draw_crossings_gdf(
     if sidewalks_gdf is None or sidewalks_gdf.empty:
         return generator._empty_result()
 
-    sidewalks_union = sidewalks_gdf.geometry.unary_union
+    sidewalks_union = sidewalks_gdf.geometry.union_all()
     generator.sidewalks_union = sidewalks_union
     if sidewalks_union.is_empty:
         return generator._empty_result()
@@ -2016,41 +2016,31 @@ def draw_sidewalks_gdf(
     # The difference gives us areas outside the road network
     sidewalk_areas = large_buffer.difference(smooth_roads)
 
-    # Convert to GeoDataFrame
-    if sidewalk_areas.geom_type == "MultiPolygon":
-        sidewalk_polygons = list(sidewalk_areas.geoms)
-    else:
-        sidewalk_polygons = [sidewalk_areas]
+    # Convert to GeoSeries and explode to handle MultiPolygons/GeometryCollections
+    sidewalk_gs = gpd.GeoSeries([sidewalk_areas], crs=gdf.crs).explode(index_parts=False)
 
     # Filter out the largest polygon (surrounding area) and keep internal ones
-    if len(sidewalk_polygons) > 1:
+    if len(sidewalk_gs) > 1:
         # Sort by area and remove the largest (external boundary)
-        sidewalk_polygons.sort(key=lambda x: x.area)
-        sidewalk_polygons = sidewalk_polygons[:-1]  # Remove largest
+        sidewalk_gs = sidewalk_gs.iloc[sidewalk_gs.area.argsort()[:-1]]
 
-    # Step 7: Convert polygons to lines (boundaries)
-    sidewalk_lines = []
-    for poly in sidewalk_polygons:
-        if poly.geom_type == "Polygon":
-            sidewalk_lines.append(poly.boundary)
-        elif poly.geom_type == "MultiPolygon":
-            for p in poly.geoms:
-                sidewalk_lines.append(p.boundary)
-
-    if not sidewalk_lines:
-        # Return empty GeoDataFrame with correct schema
+    if sidewalk_gs.empty:
         return gpd.GeoDataFrame(geometry=[], crs=gdf.crs)
 
-    sidewalks_gdf = gpd.GeoDataFrame(geometry=sidewalk_lines, crs=gdf.crs)
+    # Step 7: Convert to lines (boundaries)
+    # Vectorized extraction of boundaries and explode to handle MultiLineStrings
+    sidewalk_gs = sidewalk_gs.boundary.explode(index_parts=False)
+
+    if sidewalk_gs.empty:
+        return gpd.GeoDataFrame(geometry=[], crs=gdf.crs)
+
+    sidewalks_gdf = gpd.GeoDataFrame(geometry=sidewalk_gs, crs=gdf.crs)
 
     # Step 8: Handle exclusion/sure zones
     sidewalks_gdf = handle_sidewalk_tags(sidewalks_gdf, streets_gdf)
 
     # Step 9: Calculate properties
     sidewalks_gdf = calculate_sidewalk_properties(sidewalks_gdf)
-
-    # Explode multilinestrings to linestrings
-    sidewalks_gdf = sidewalks_gdf.explode(index_parts=False)
 
     return sidewalks_gdf
 
