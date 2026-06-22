@@ -6,6 +6,9 @@ transforming geospatial data using GeoPandas and other related libraries.
 """
 
 import math
+import os
+import json
+import pandas as pd
 import geopandas as gpd
 from typing import Optional, List, Tuple
 import shapely
@@ -310,9 +313,7 @@ def polygonize_lines_gdf(gdf: gpd.GeoDataFrame, clip_geom: gpd.GeoDataFrame = No
     return gdf_poly
 
 
-import json
 import re
-import pandas as pd
 
 # Regular expression for HSTORE-like format
 # This unrolled loop pattern is robust against ReDoS and handles backslash-escaped characters
@@ -2121,8 +2122,97 @@ def save_debug_layer(
         layer_name: The name of the layer (used for the filename).
         output_dir: The directory to save the debug layer in.
     """
-    import os
-
     os.makedirs(output_dir, exist_ok=True)
     layer_path = os.path.join(output_dir, f"{layer_name}.geojson")
     gdf.to_file(layer_path, driver="GeoJSON")
+
+
+def save_gdf_to_geojson(
+    gdf: gpd.GeoDataFrame, filepath: str, include_empty: bool = True
+):
+    """Saves a GeoDataFrame to a GeoJSON file, ensuring EPSG:4326.
+
+    Args:
+        gdf: The GeoDataFrame to save.
+        filepath: The path to save the file to.
+        include_empty: Whether to save an empty GeoJSON if the GeoDataFrame is empty.
+    """
+    if gdf is None or gdf.empty:
+        if include_empty:
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            empty_geojson = {"type": "FeatureCollection", "features": []}
+            with open(filepath, "w") as f:
+                json.dump(empty_geojson, f)
+        return
+
+    # Reproject to EPSG:4326 if needed
+    if gdf.crs is not None and str(gdf.crs) != "EPSG:4326":
+        gdf = gdf.to_crs("EPSG:4326")
+
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    gdf.to_file(filepath, driver="GeoJSON")
+
+
+def create_merged_output(
+    output_directory: str,
+    sidewalks_gdf: Optional[gpd.GeoDataFrame],
+    crossings_gdf: Optional[gpd.GeoDataFrame],
+    kerbs_gdf: Optional[gpd.GeoDataFrame],
+):
+    """Create a merged GeoJSON file for easy import into JOSM.
+
+    This follows the QGIS plugin behavior of creating a single file with
+    all features for easy uploading to OpenStreetMap.
+    """
+
+    def _prepare_gdf(gdf):
+        if gdf is not None and not gdf.empty:
+            if gdf.crs is not None and str(gdf.crs) != "EPSG:4326":
+                return gdf.to_crs("EPSG:4326")
+        return gdf
+
+    sidewalks_gdf = _prepare_gdf(sidewalks_gdf)
+    crossings_gdf = _prepare_gdf(crossings_gdf)
+    kerbs_gdf = _prepare_gdf(kerbs_gdf)
+
+    merged_features = []
+    sidewalk_count = 0
+    crossing_count = 0
+
+    # Add sidewalks as lines
+    if sidewalks_gdf is not None and not sidewalks_gdf.empty:
+        temp_gdf = sidewalks_gdf[[sidewalks_gdf.geometry.name]].copy()
+        temp_gdf["highway"] = "footway"
+        temp_gdf["footway"] = "sidewalk"
+        merged_features.extend(temp_gdf.__geo_interface__["features"])
+        sidewalk_count = len(temp_gdf)
+
+    # Add crossings as lines
+    if crossings_gdf is not None and not crossings_gdf.empty:
+        temp_gdf = crossings_gdf[[crossings_gdf.geometry.name]].copy()
+        temp_gdf["highway"] = "footway"
+        temp_gdf["footway"] = "crossing"
+        merged_features.extend(temp_gdf.__geo_interface__["features"])
+        crossing_count = len(temp_gdf)
+
+    # Add kerbs as points
+    if kerbs_gdf is not None and not kerbs_gdf.empty:
+        temp_gdf = kerbs_gdf[[kerbs_gdf.geometry.name]].copy()
+        temp_gdf["barrier"] = "kerb"
+        merged_features.extend(temp_gdf.__geo_interface__["features"])
+
+    # Create merged GeoJSON
+    merged_geojson = {"type": "FeatureCollection", "features": merged_features}
+
+    # Save merged file
+    os.makedirs(output_directory, exist_ok=True)
+    merged_path = os.path.join(output_directory, "sidewalkreator_output.geojson")
+    with open(merged_path, "w") as f:
+        json.dump(merged_geojson, f, indent=2)
+
+    # Create changeset comment file
+    comment_path = os.path.join(output_directory, "changeset_comment.txt")
+    with open(comment_path, "w") as f:
+        f.write("Generated sidewalks, crossings, and kerbs using OSM SidewalKreator\n")
+        f.write(f"Added {sidewalk_count} sidewalk segments\n")
+        f.write(f"Added {crossing_count} crossings\n")

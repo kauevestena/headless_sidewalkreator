@@ -8,7 +8,11 @@ import os
 import geopandas as gpd
 
 from .full_sidewalkreator_algorithm import sidewalkreator
-from .generic_functions import read_input_polygon
+from .generic_functions import (
+    read_input_polygon,
+    save_gdf_to_geojson,
+    create_merged_output,
+)
 from .logging_config import get_logger
 
 
@@ -17,150 +21,39 @@ logger = get_logger(__name__)
 
 def save_results_to_directory(result, output_directory):
     """Save GeoDataFrame results to files for CLI compatibility.
-    
+
     Args:
         result: Dictionary containing GeoDataFrames from sidewalkreator()
         output_directory: Directory where the output files will be saved
     """
-    # Create output directory if it doesn't exist
-    if not os.path.exists(output_directory):
-        os.makedirs(output_directory)
-
-    # Extract results
-    splitted_sidewalks_gdf = result['sidewalks']
-    crossings_gdf = result['crossings']
-    kerbs_gdf = result['kerbs']
-    protoblocks_gdf = result['protoblocks']
-    intersection_points_gdf = result['intersection_points']
-    unified_pois_gdf = result['pois']
-    run_params = result['parameters']
-    actual_input_gdf = result['input_area']
+    os.makedirs(output_directory, exist_ok=True)
+    aux_dir = os.path.join(output_directory, "auxiliary")
 
     # Save auxiliary files
-    auxiliary_output_directory = os.path.join(output_directory, "auxiliary")
-    if not os.path.exists(auxiliary_output_directory):
-        os.makedirs(auxiliary_output_directory)
-
-    input_polygon_output_path = os.path.join(auxiliary_output_directory, "input_polygon.geojson")
-    actual_input_gdf.to_crs("EPSG:4326").to_file(input_polygon_output_path, driver="GeoJSON")
-
-    intersection_points_output_path = os.path.join(auxiliary_output_directory, "intersection_points.geojson")
-    if not intersection_points_gdf.empty:
-        intersection_points_gdf.to_crs("EPSG:4326").to_file(
-            intersection_points_output_path, driver="GeoJSON"
-        )
-
-    # Save POI data
-    pois_output_path = os.path.join(auxiliary_output_directory, "pois.geojson")
-    if not unified_pois_gdf.empty:
-        unified_pois_gdf.to_crs("EPSG:4326").to_file(pois_output_path, driver="GeoJSON")
+    save_gdf_to_geojson(result["input_area"], os.path.join(aux_dir, "input_polygon.geojson"))
+    save_gdf_to_geojson(result["intersection_points"], os.path.join(aux_dir, "intersection_points.geojson"), include_empty=False)
+    save_gdf_to_geojson(result["pois"], os.path.join(aux_dir, "pois.geojson"), include_empty=False)
 
     # Save main output files
-    output_path = os.path.join(output_directory, "protoblocks_output.geojson")
-    if not protoblocks_gdf.empty:
-        protoblocks_gdf.to_crs("EPSG:4326").to_file(output_path, driver="GeoJSON")
-
-    # Pre-convert to EPSG:4326 for reuse
-    sidewalks_4326 = splitted_sidewalks_gdf.to_crs("EPSG:4326") if not splitted_sidewalks_gdf.empty else splitted_sidewalks_gdf
-    crossings_4326 = crossings_gdf.to_crs("EPSG:4326") if not crossings_gdf.empty else crossings_gdf
-    kerbs_4326 = kerbs_gdf.to_crs("EPSG:4326") if not kerbs_gdf.empty else kerbs_gdf
-
-    sidewalks_output_path = os.path.join(output_directory, "sidewalks_output.geojson")
-    if not sidewalks_4326.empty:
-        sidewalks_4326.to_file(sidewalks_output_path, driver="GeoJSON")
-    else:
-        # Create empty file for consistency
-        empty_geojson = {"type": "FeatureCollection", "features": []}
-        with open(sidewalks_output_path, "w") as f:
-            json.dump(empty_geojson, f)
-
-    crossings_output_path = os.path.join(output_directory, "crossings_output.geojson")
-    if not crossings_4326.empty:
-        crossings_4326.to_file(crossings_output_path, driver="GeoJSON")
-    else:
-        # Create empty file for consistency
-        empty_geojson = {"type": "FeatureCollection", "features": []}
-        with open(crossings_output_path, "w") as f:
-            json.dump(empty_geojson, f)
-
-    kerbs_output_path = os.path.join(output_directory, "kerbs_output.geojson")
-    if not kerbs_4326.empty:
-        kerbs_4326.to_file(kerbs_output_path, driver="GeoJSON")
+    save_gdf_to_geojson(result["protoblocks"], os.path.join(output_directory, "protoblocks_output.geojson"), include_empty=False)
+    save_gdf_to_geojson(result["sidewalks"], os.path.join(output_directory, "sidewalks_output.geojson"))
+    save_gdf_to_geojson(result["crossings"], os.path.join(output_directory, "crossings_output.geojson"))
+    save_gdf_to_geojson(result["kerbs"], os.path.join(output_directory, "kerbs_output.geojson"), include_empty=False)
 
     # Create merged output file (following QGIS plugin behavior)
     create_merged_output(
         output_directory,
-        sidewalks_4326 if not sidewalks_4326.empty else None,
-        crossings_4326 if not crossings_4326.empty else None,
-        kerbs_4326 if not kerbs_4326.empty else None,
+        result["sidewalks"],
+        result["crossings"],
+        result["kerbs"],
     )
 
     # Save parameters to a file
     params_output_path = os.path.join(output_directory, "parameters.json")
     with open(params_output_path, "w") as f:
-        json.dump(run_params, f, indent=4)
+        json.dump(result["parameters"], f, indent=4)
 
     logger.info("Process complete. Output saved to %s", output_directory)
-
-
-def create_merged_output(output_directory, sidewalks_gdf, crossings_gdf, kerbs_gdf):
-    """Create a merged GeoJSON file for easy import into JOSM.
-
-    This follows the QGIS plugin behavior of creating a single file with
-    all features for easy uploading to OpenStreetMap.
-    Note: The input GeoDataFrames must already be in EPSG:4326.
-    """
-    merged_features = []
-    sidewalk_count = 0
-    crossing_count = 0
-
-    # Add sidewalks as lines
-    if sidewalks_gdf is not None and not sidewalks_gdf.empty:
-        for geom in sidewalks_gdf.geometry:
-            feature = {
-                "type": "Feature",
-                "properties": {"highway": "footway", "footway": "sidewalk"},
-                "geometry": geom.__geo_interface__
-            }
-            merged_features.append(feature)
-
-    # Add crossings as lines
-    if crossings_gdf is not None and not crossings_gdf.empty:
-        for geom in crossings_gdf.geometry:
-            feature = {
-                "type": "Feature",
-                "properties": {"highway": "footway", "footway": "crossing"},
-                "geometry": geom.__geo_interface__
-            }
-            merged_features.append(feature)
-
-    # Add kerbs as points
-    if kerbs_gdf is not None and not kerbs_gdf.empty:
-        for geom in kerbs_gdf.geometry:
-            feature = {
-                "type": "Feature",
-                "properties": {"barrier": "kerb"},
-                "geometry": geom.__geo_interface__
-            }
-            merged_features.append(feature)
-
-    # Create merged GeoJSON
-    merged_geojson = {
-        "type": "FeatureCollection",
-        "features": merged_features
-    }
-
-    # Save merged file
-    merged_path = os.path.join(output_directory, "sidewalkreator_output.geojson")
-    with open(merged_path, 'w') as f:
-        json.dump(merged_geojson, f, indent=2)
-
-    # Create changeset comment file
-    comment_path = os.path.join(output_directory, "changeset_comment.txt")
-    with open(comment_path, 'w') as f:
-        f.write("Generated sidewalks, crossings, and kerbs using OSM SidewalKreator\n")
-        f.write(f"Added {sidewalk_count} sidewalk segments\n")
-        f.write(f"Added {crossing_count} crossings\n")
 
 
 def main():
