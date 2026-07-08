@@ -445,7 +445,9 @@ def adjust_buffer_for_buildings(
         line = row.geometry
 
         # Get road width if available, otherwise use sensible default
-        road_width = row.get("width", 6.0)  # Default 6m road width
+        road_width = row.get("width", 6.0)
+        if pd.isna(road_width) or road_width <= 0:
+            road_width = 6.0
 
         # Find potential building matches using spatial index with expanded bounds
         # Expand line bounds by default buffer distance to catch nearby buildings
@@ -520,7 +522,10 @@ def handle_sidewalk_tags(
     no_sidewalk_streets = streets_gdf[streets_gdf["sidewalk"] == "no"]
     if not no_sidewalk_streets.empty:
         # Vectorized buffer: road_width/2 + 1.0
-        road_widths = no_sidewalk_streets.get("width", 6.0)
+        if "width" in no_sidewalk_streets.columns:
+            road_widths = pd.to_numeric(no_sidewalk_streets["width"], errors="coerce").fillna(6.0)
+        else:
+            road_widths = 6.0
         buffer_distances = (road_widths / 2) + 1.0
         exclusion_geometries.extend(
             no_sidewalk_streets.geometry.buffer(buffer_distances)
@@ -531,7 +536,10 @@ def handle_sidewalk_tags(
         side_streets = streets_gdf[streets_gdf["sidewalk"] == side]
         if not side_streets.empty:
             # Vectorized offset and buffer
-            road_widths = side_streets.get("width", 6.0)
+            if "width" in side_streets.columns:
+                road_widths = pd.to_numeric(side_streets["width"], errors="coerce").fillna(6.0)
+            else:
+                road_widths = 6.0
             buffer_distances = road_widths / 2
             offset_lines = side_streets.geometry.offset_curve(
                 buffer_distances if side == "left" else -buffer_distances, join_style=2
@@ -834,7 +842,7 @@ class _CrossingsGenerator:
             value = float(value)
         except (TypeError, ValueError):
             value = self.fallback_width
-        if value <= 0:
+        if pd.isna(value) or value <= 0:
             value = self.fallback_width
         return value
 
@@ -857,7 +865,7 @@ class _CrossingsGenerator:
             value = float(value)
         except (TypeError, ValueError):
             value = self.fallback_width
-        if value <= 0:
+        if pd.isna(value) or value <= 0:
             value = self.fallback_width
         return value
 

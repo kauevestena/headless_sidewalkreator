@@ -589,3 +589,35 @@ def test_clean_geometries_gdf():
     # and snapped to 0.1 (coordinates are already integers, so unchanged by snapping)
     assert len(geoms[2].exterior.coords) == 5
     assert (1.0, 0.0) not in list(geoms[2].exterior.coords)
+
+def test_resolve_width_namedtuple_with_nan():
+    from headless_sidewalkreator.generic_functions import _CrossingsGenerator
+    from collections import namedtuple
+    import pandas as pd
+    import numpy as np
+
+    generator = _CrossingsGenerator()
+    generator.fallback_width = 6.0
+
+    Row = namedtuple("Row", ["width"])
+
+    # Test with NaN
+    row_nan = Row(width=np.nan)
+    assert generator._resolve_width_namedtuple(row_nan) == 6.0
+
+    # Test with None
+    row_none = Row(width=None)
+    assert generator._resolve_width_namedtuple(row_none) == 6.0
+
+    # Test with valid width
+    row_valid = Row(width=8.0)
+    assert generator._resolve_width_namedtuple(row_valid) == 8.0
+
+    # Test with non-numeric
+    row_str = Row(width="invalid")
+    assert generator._resolve_width_namedtuple(row_str) == 6.0
+
+    # Test missing width (getattr default)
+    RowNoWidth = namedtuple("RowNoWidth", ["other"])
+    row_no_width = RowNoWidth(other=1)
+    assert generator._resolve_width_namedtuple(row_no_width) == 6.0
