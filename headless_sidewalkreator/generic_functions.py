@@ -317,7 +317,9 @@ import re
 
 # Regular expression for HSTORE-like format
 # This unrolled loop pattern is robust against ReDoS and handles backslash-escaped characters
-HSTORE_PATTERN = re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"\s*=>\s*"([^"\\]*(?:\\.[^"\\]*)*)"')
+HSTORE_PATTERN = re.compile(
+    r'"([^"\\]*(?:\\.[^"\\]*)*)"\s*=>\s*"([^"\\]*(?:\\.[^"\\]*)*)"'
+)
 
 
 def parse_tags(tags: str) -> dict:
@@ -329,20 +331,36 @@ def parse_tags(tags: str) -> dict:
     if len(tags) > 100000:
         return {}
 
-    # Check for excessive nesting to prevent RecursionError during JSON parsing
+    # Robust depth check to prevent RecursionError during JSON parsing
+    # Handles strings, escapes, and negative depth
     depth = 0
     max_depth = 20
+    in_string = False
+    escaped = False
     for char in tags:
-        if char in ("{", "["):
-            depth += 1
-        elif char in ("}", "]"):
-            depth -= 1
-        if depth > max_depth:
-            return {}
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if not in_string:
+            if char in ("{", "["):
+                depth += 1
+            elif char in ("}", "]"):
+                depth -= 1
+
+            if depth > max_depth or depth < 0:
+                return {}
 
     # 1. Try JSON format
     try:
-        return json.loads(tags)
+        result = json.loads(tags)
+        if isinstance(result, dict):
+            return result
     except (json.JSONDecodeError, RecursionError):
         pass
 
@@ -358,12 +376,6 @@ def parse_tags(tags: str) -> dict:
         return {}
 
 from shapely.ops import split, substring
-
-# HSTORE-like format regex: "key"=>"value", handles backslash-escaped quotes
-# Uses an "unrolled loop" pattern for performance and ReDoS protection
-HSTORE_PATTERN = re.compile(
-    r'"([^"\\]*(?:\\.[^"\\]*)*)"\s*=>\s*"([^"\\]*(?:\\.[^"\\]*)*)"'
-)
 
 
 def split_lines_at_intersections(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
