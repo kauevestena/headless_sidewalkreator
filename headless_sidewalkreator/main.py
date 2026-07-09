@@ -69,6 +69,23 @@ def main():
         formatter_class=argparse.RawTextHelpFormatter,
     )
 
+    # Planet download options
+    planet_group = parser.add_argument_group('Planet Download Options')
+    planet_group.add_argument(
+        "--planet-download",
+        action="store_true",
+        help="Enable planet download mode instead of standard Overpass API."
+    )
+    planet_group.add_argument(
+        "--provider",
+        choices=["overture", "protomaps"],
+        help="Select the data provider for planet download."
+    )
+    planet_group.add_argument(
+        "--release",
+        help="Specific release version for the provider (e.g., Overture release date)."
+    )
+
     # Input source group - either a file, a place name, or a bounding box
     input_group = parser.add_mutually_exclusive_group(required=True)
     input_group.add_argument(
@@ -125,6 +142,14 @@ def main():
     input_polygon_gdf = None
     if args.input_polygon_path:
         input_polygon_gdf = read_input_polygon(args.input_polygon_path)
+
+    # Handle planet download provider and kwargs
+    if args.planet_download or args.provider:
+        parameters["provider"] = args.provider or "overture"
+        provider_kwargs = {}
+        if args.release:
+            provider_kwargs["release"] = args.release
+        parameters["provider_kwargs"] = provider_kwargs
 
     # Call the new GeoDataFrame-based API
     result = sidewalkreator(

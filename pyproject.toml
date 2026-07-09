@@ -29,6 +29,10 @@ dependencies = [
   "rtree>=1.0",
   "pandas>=1.5",
   "networkx>=3.0",
+  "duckdb>=1.0.0",
+  "pmtiles>=3.0.0",
+  "mapbox-vector-tile>=2.0.0",
+  "requests>=2.30",
 ]
 
 [project.urls]

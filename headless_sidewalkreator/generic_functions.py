@@ -134,7 +134,12 @@ import osmnx as ox
 from .osm_fetch import get_osm_data
 
 
-def fetch_street_network_for_bbox(bbox: tuple, timeout: int = 60) -> gpd.GeoDataFrame:
+def fetch_street_network_for_bbox(
+    bbox: tuple,
+    timeout: int = 60,
+    provider: str = None,
+    **kwargs
+) -> gpd.GeoDataFrame:
     """Fetches the street network for a given bounding box.
 
     This function uses an internal helper that wraps OSMnx to fetch the street
@@ -143,13 +148,15 @@ def fetch_street_network_for_bbox(bbox: tuple, timeout: int = 60) -> gpd.GeoData
     Args:
         bbox: A tuple representing the bounding box.
         timeout: The timeout for the OSM data request.
+        provider: Optional provider name ('overture', 'protomaps').
+        **kwargs: Provider-specific arguments.
 
     Returns:
         A GeoDataFrame containing the street network.
     """
     tags = {"highway": True, "building": True, "amenity": True, "shop": True}
     try:
-        gdf = get_osm_data(bbox, tags=tags, timeout=timeout)
+        gdf = get_osm_data(bbox, tags=tags, timeout=timeout, provider=provider, **kwargs)
     except Exception:
         gdf = None
 
