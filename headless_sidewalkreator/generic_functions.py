@@ -259,6 +259,8 @@ def polygonize_lines_gdf(gdf: gpd.GeoDataFrame, clip_geom: gpd.GeoDataFrame = No
                         lines.append(interior)
 
     # Noding lines via union_all
+    from shapely import set_precision
+    lines = [set_precision(line, 1e-4) for line in lines]
     merged_lines = gpd.GeoSeries(lines, crs=gdf.crs).union_all()
 
     # Try polygonize on the noded geometry
@@ -299,13 +301,14 @@ def polygonize_lines_gdf(gdf: gpd.GeoDataFrame, clip_geom: gpd.GeoDataFrame = No
                 clip_ext = clip_geom_union.exterior if clip_geom_union.geom_type == 'Polygon' else clip_geom_union.boundary
 
                 overlap = poly_ext.intersection(clip_ext.buffer(1e-3))
+                overlap_ratio = overlap.length / poly_ext.length if poly_ext.length > 0 else 0
 
                 # If a significant portion of its perimeter is the bounding box, it's likely the outer shell.
                 # The outer shell is usually touching all 4 sides, whereas inner blocks touch 0, 1, or 2 sides typically.
                 # Alternatively, we can check if the polygon contains the union of all lines (as the outer shell does)
                 # But a cleaner way is just checking area relative to bounding box.
 
-                if len(polygons) > 1 and poly.area >= clip_geom_union.area * 0.5:
+                if len(polygons) > 1 and overlap_ratio > 0.95 and poly.area >= clip_geom_union.area * 0.5:
                     # In some exact test scenarios, the bounding box *is* the only polygon generated.
                     # We don't want to filter it out if it's the only one. However, if there are multiple,
                     # the largest one (typically > 50% of the bounding box area) is the external empty space
@@ -402,6 +405,10 @@ def split_lines_at_intersections(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 
     # Leverage shapely's robust noding via union_all to accurately split lines
     # at all self-intersections and intersections between different lines.
+    # Use a small precision to ensure robust noding
+    from shapely import set_precision
+    gdf = gdf.copy()
+    gdf.geometry = set_precision(gdf.geometry, 1e-4)
     merged = gdf.geometry.union_all()
 
     # Extract the resulting LineStrings
