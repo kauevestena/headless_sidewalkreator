@@ -6,6 +6,22 @@ This repository contains a headless (CLI / library) version of the QGIS plugin
 OSM Sidewalkreator.
 
 ## API Overview
+### Planet Download API
+
+You can now use cloud-optimized planet files (Overture Maps or Protomaps) as data sources:
+
+```python
+result = sidewalkreator(
+    bbox=(-72.53, 42.37, -72.52, 42.38),
+    parameters={
+        "provider": "overture",
+        "provider_kwargs": {"release": "2026-06-17.0"}
+    }
+)
+```
+
+See [PLANET_SOURCES.md](PLANET_SOURCES.md) for more details.
+
 
 The library provides several APIs for different use cases:
 

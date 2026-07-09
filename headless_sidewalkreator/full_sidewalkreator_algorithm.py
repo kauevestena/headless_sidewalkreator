@@ -67,6 +67,8 @@ def _fetch_and_clip_osm(
     input_gdf: gpd.GeoDataFrame,
     osm_gdf: gpd.GeoDataFrame = None,
     timeout: int = 60,
+    provider: str = None,
+    **kwargs
 ) -> gpd.GeoDataFrame:
     """Fetch OSM data for the input area and clip it."""
     # 2. Get bounding box
@@ -74,7 +76,7 @@ def _fetch_and_clip_osm(
 
     # 3. Fetch OSM Data (allow injection via `osm_gdf`)
     if osm_gdf is None:
-        osm_gdf = fetch_street_network_for_bbox(bbox, timeout=timeout)
+        osm_gdf = fetch_street_network_for_bbox(bbox, timeout=timeout, provider=provider, **kwargs)
     logger.info("Step 3 complete")
 
     # 4. Clip data
@@ -324,7 +326,7 @@ def generate_protoblocks(
         run_params.update(parameters)
 
     input_gdf = _resolve_input_area(place_name, input_polygon_gdf, bbox)
-    clipped_gdf = _fetch_and_clip_osm(input_gdf, osm_gdf, run_params["timeout"])
+    clipped_gdf = _fetch_and_clip_osm(input_gdf, osm_gdf, run_params["timeout"], provider=run_params.get("provider"), **run_params.get("provider_kwargs", {}))
     splitted_gdf, _, _ = _preprocess_osm_data(
         clipped_gdf,
         input_gdf,
@@ -408,7 +410,7 @@ def sidewalkreator(
 
     # 1-7. Core preprocessing
     input_gdf = _resolve_input_area(place_name, input_polygon_gdf, bbox)
-    clipped_gdf = _fetch_and_clip_osm(input_gdf, osm_gdf, run_params["timeout"])
+    clipped_gdf = _fetch_and_clip_osm(input_gdf, osm_gdf, run_params["timeout"], provider=run_params.get("provider"), **run_params.get("provider_kwargs", {}))
     splitted_gdf, cleaned_gdf, clipped_reproj_gdf = _preprocess_osm_data(
         clipped_gdf,
         input_gdf,
