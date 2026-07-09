@@ -16,10 +16,8 @@ def run_grid_test(w, h):
         crs="EPSG:3857"
     )
 
-    # Grid inner squares are (1,1) to (w+1, h+1)
-    # By using a slightly smaller box (1.001 to w+0.999), we exclude all the edge slivers.
-    # This should leave exactly w*h blocks.
-    input_polygon = box(1.001, 1.001, w + 0.999, h + 0.999)
+    # EXACT grid area
+    input_polygon = box(1, 1, w + 1, h + 1)
     input_gdf = gpd.GeoDataFrame(geometry=[input_polygon], crs="EPSG:3857")
 
     start_time = time.time()
@@ -32,7 +30,6 @@ def run_grid_test(w, h):
     duration = end_time - start_time
     count = len(protoblocks_gdf)
 
-    # Save a plot for the 5x5 case
     if w == 5 and h == 5:
         fig, ax = plt.subplots(figsize=(8, 8))
         protoblocks_gdf.plot(ax=ax, alpha=0.5, edgecolor='black', facecolor='cyan')

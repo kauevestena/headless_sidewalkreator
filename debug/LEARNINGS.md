@@ -1,6 +1,6 @@
-# Learnings from Protoblocks Testing Task
+# Learnings from Protoblocks Bug Fix and Testing
 
-- **Environment Setup**: Standard `pytest` in this environment might miss dependencies like `geopandas`. Installing with `pip install -e .[dev]` is the correct way to ensure the package and its dependencies are available.
-- **Protoblock Clipping**: The `polygonize_lines_gdf` function uses a heuristic to filter out the "outer background" polygon (area >= 50% of the bounding box). This is effective for urban blocks but requires careful selection of the clipping area in tests to ensure inner blocks are not accidentally merged with the background or excluded.
-- **Grid Testing**: `grid_lines` generates lines with specific overhangs. When testing for a specific number of blocks, the clipping polygon should ideally be aligned with the intended block boundaries or slightly inside them to avoid capturing boundary slivers.
-- **Large-Scale Validation**: Real-world data from Curitiba provided a robust test case for performance (~285 blocks in ~72s, though cached/subsequent runs are much faster as seen in the final verification).
+- **Polygonization Heuristics**: Filtering the "background" polygon in a clipping operation is tricky. A simple area-based check (`area >= 50%`) fails when internal blocks are large or when precision issues cause edge blocks to merge.
+- **Robust Noding**: Spatial operations like `union_all` and `polygonize` are highly sensitive to floating point precision. Using `shapely.set_precision` (e.g., `1e-4`) is critical for ensuring that lines that are "meant" to touch actually node together, especially after coordinate transformations (like UTM projection).
+- **Overlap Ratio**: Combining area checks with boundary overlap (`overlap_ratio > 0.95`) provides a much more robust way to identify the "outer shell" of a polygonization result.
+- **Grid Testing**: Using simple grids with known properties is an extremely effective way to catch subtle geometric bugs that might be hidden in complex real-world data.
