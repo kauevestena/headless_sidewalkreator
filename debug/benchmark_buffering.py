@@ -26,7 +26,10 @@ def optimized_approach(streets_gdf):
     sure_streets = streets_gdf[streets_gdf["sidewalk"].isin(["yes", "both"])]
     if not sure_streets.empty:
         # Vectorized buffer
-        road_widths = pd.to_numeric(sure_streets.get("width", 6.0), errors="coerce").fillna(6.0)
+        if "width" in sure_streets.columns:
+            road_widths = pd.to_numeric(sure_streets["width"], errors="coerce").fillna(6.0)
+        else:
+            road_widths = 6.0
         buffer_distances = (road_widths / 2) + 1.0
         sure_geometries.extend(sure_streets.geometry.buffer(buffer_distances).tolist())
     return sure_geometries
