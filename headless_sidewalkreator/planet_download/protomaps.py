@@ -3,9 +3,11 @@ from typing import Tuple, Dict, Optional, Any, List
 import geopandas as gpd
 import pandas as pd
 from shapely.geometry import shape, box
+from shapely.affinity import affine_transform
 import requests
 import io
 import math
+import gzip
 
 try:
     from pmtiles.reader import Reader
@@ -81,19 +83,34 @@ class ProtomapsDownloader(PlanetDownloader):
                     continue
 
                 if tile_data:
+                    if tile_data.startswith(b'\x1f\x8b'):
+                        tile_data = gzip.decompress(tile_data)
                     decoded = mapbox_vector_tile.decode(tile_data)
                     for layer_name in ['roads', 'buildings']:
                         if layer_name in decoded:
                             layer = decoded[layer_name]
+                            extent = layer.get('extent', 4096)
+                            nw_lat, nw_lon = self._tile_nw(x, y, zoom)
+                            se_lat, se_lon = self._tile_nw(x + 1, y + 1, zoom)
+                            x_scale = (se_lon - nw_lon) / extent
+                            y_scale = (se_lat - nw_lat) / extent
                             for feature in layer['features']:
                                 properties = feature['properties']
                                 if layer_name == 'roads':
-                                    properties['highway'] = properties.get('kind', 'residential')
+                                    properties['highway'] = (
+                                        properties.get('pmap:kind_detail') or
+                                        properties.get('pmap:kind') or
+                                        properties.get('kind_detail') or
+                                        properties.get('kind') or
+                                        'residential'
+                                    )
                                 elif layer_name == 'buildings':
                                     properties['building'] = 'yes'
 
+                                geom = shape(feature['geometry'])
+                                geom_transformed = affine_transform(geom, [x_scale, 0, 0, y_scale, nw_lon, nw_lat])
                                 all_features.append({
-                                    'geometry': shape(feature['geometry']),
+                                    'geometry': geom_transformed,
                                     'properties': properties
                                 })
 
