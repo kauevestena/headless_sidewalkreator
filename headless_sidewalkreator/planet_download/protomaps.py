@@ -1,20 +1,21 @@
 import logging
-from typing import Tuple, Dict, Optional, Any, List
+from typing import Tuple, Dict, Optional, Any
 import geopandas as gpd
-import pandas as pd
-from shapely.geometry import shape, box
+from shapely.geometry import shape
 from shapely.affinity import affine_transform
 import requests
-import io
-import math
 import gzip
+import mercantile
+import time
+from tqdm import tqdm
 
 try:
     from pmtiles.reader import Reader
-    from pmtiles.tile import TileType
+    from pmtiles.tile import Compression
     import mapbox_vector_tile
 except ImportError:
     Reader = None
+    Compression = None
     mapbox_vector_tile = None
 
 from .base import PlanetDownloader
@@ -31,19 +32,30 @@ class ProtomapsDownloader(PlanetDownloader):
     def provider_name(self) -> str:
         return "protomaps"
 
-    def _deg2num(self, lat_deg, lon_deg, zoom):
-        lat_rad = math.radians(lat_deg)
-        n = 2.0 ** zoom
-        xtile = int((lon_deg + 180.0) / 360.0 * n)
-        ytile = int((1.0 - math.log(math.tan(lat_rad) + (1 / math.cos(lat_rad))) / math.pi) / 2.0 * n)
-        return (xtile, ytile)
+    def _tiles_for_bbox(self, bbox, zoom):
+        minx, miny, maxx, maxy = bbox
+        return list(mercantile.tiles(minx, miny, maxx, maxy, zooms=[zoom]))
 
-    def _tile_nw(self, x, y, z):
-        n = 2.0 ** z
-        lon_deg = x / n * 360.0 - 180.0
-        lat_rad = math.atan(math.sinh(math.pi * (1 - 2 * y / n)))
-        lat_deg = math.degrees(lat_rad)
-        return (lat_deg, lon_deg)
+    def _tile_bounds(self, tile):
+        return mercantile.bounds(tile)
+
+    def _include_road_feature(self, properties):
+        pmap_kind = properties.get("pmap:kind")
+        return isinstance(pmap_kind, str) and pmap_kind.endswith("_road")
+
+    def _decompress_tile(self, tile_data, tile_compression):
+        if tile_data.startswith(b'\x1f\x8b'):
+            return gzip.decompress(tile_data)
+        if Compression is not None and tile_compression == Compression.GZIP:
+            return gzip.decompress(tile_data)
+        if tile_compression is None:
+            return tile_data
+        if Compression is not None and tile_compression in (
+            Compression.NONE,
+            Compression.UNKNOWN,
+        ):
+            return tile_data
+        raise ValueError(f"Unsupported Protomaps tile compression: {tile_compression}")
 
     def get_data(
         self,
@@ -56,63 +68,130 @@ class ProtomapsDownloader(PlanetDownloader):
             logger.error("pmtiles or mapbox-vector-tile not installed.")
             return gpd.GeoDataFrame(columns=['geometry'], crs="EPSG:4326")
 
-        minx, miny, maxx, maxy = bbox
         zoom = kwargs.get('zoom', 14)
+        request_timeout = kwargs.get('timeout', 60)
+        max_retries = kwargs.get('max_retries', 2)
+        show_progress = kwargs.get('show_progress', True)
+        tiles = self._tiles_for_bbox(bbox, zoom)
 
-        xtile_min, ytile_max = self._deg2num(miny, minx, zoom)
-        xtile_max, ytile_min = self._deg2num(maxy, maxx, zoom)
-
-        logger.info(f"Fetching tiles for zoom {zoom}, x: {xtile_min}-{xtile_max}, y: {ytile_min}-{ytile_max}")
+        logger.info(
+            "Fetching %s tiles for bbox %s at zoom %s",
+            len(tiles),
+            bbox,
+            zoom,
+        )
 
         all_features = []
         session = requests.Session()
+        range_cache = {}
 
         def remote_get(offset, length):
-            headers = {"Range": f"bytes={offset}-{offset + length - 1}"}
-            resp = session.get(self.url, headers=headers)
-            return resp.content
+            cache_key = (offset, length)
+            if cache_key in range_cache:
+                return range_cache[cache_key]
+
+            headers = {
+                "Range": f"bytes={offset}-{offset + length - 1}",
+                "Accept-Encoding": "identity",
+            }
+            last_exc = None
+            for attempt in range(max_retries + 1):
+                try:
+                    resp = session.get(
+                        self.url,
+                        headers=headers,
+                        timeout=request_timeout,
+                    )
+                    resp.raise_for_status()
+                    if resp.status_code != 206:
+                        raise requests.HTTPError(
+                            f"Expected HTTP 206 Partial Content, got {resp.status_code}",
+                            response=resp,
+                        )
+                    if len(resp.content) != length:
+                        raise requests.HTTPError(
+                            f"Expected {length} bytes, got {len(resp.content)}",
+                            response=resp,
+                        )
+                    range_cache[cache_key] = resp.content
+                    return resp.content
+                except requests.RequestException as exc:
+                    last_exc = exc
+                    if attempt < max_retries:
+                        time.sleep(min(2 ** attempt, 5))
+
+            raise last_exc
 
         reader = Reader(remote_get)
+        try:
+            header = reader.header()
+            tile_compression = (
+                header.get("tile_compression") if isinstance(header, dict) else None
+            )
+        except Exception as e:
+            logger.error(f"Failed to read Protomaps PMTiles header: {e}")
+            return gpd.GeoDataFrame(columns=['geometry'], crs="EPSG:4326")
 
-        for x in range(xtile_min, xtile_max + 1):
-            for y in range(ytile_min, ytile_max + 1):
+        tile_iter = tqdm(
+            tiles,
+            desc="Fetching Protomaps tiles",
+            unit="tile",
+            disable=not show_progress,
+        )
+
+        for tile in tile_iter:
+            x, y, z = tile
+            try:
+                tile_data = reader.get(z, x, y)
+            except Exception as e:
+                logger.warning(f"Failed to fetch tile {z}/{x}/{y}: {e}")
+                continue
+
+            if tile_data:
                 try:
-                    tile_data = reader.get(zoom, x, y)
+                    tile_data = self._decompress_tile(tile_data, tile_compression)
+                    # Keep native MVT tile coordinates. The affine transform
+                    # below maps the tile's Y-down coordinate space to lon/lat.
+                    decoded = mapbox_vector_tile.decode(
+                        tile_data,
+                        default_options={"y_coord_down": True},
+                    )
                 except Exception as e:
-                    logger.warning(f"Failed to fetch tile {zoom}/{x}/{y}: {e}")
+                    logger.warning(f"Failed to decode tile {z}/{x}/{y}: {e}")
                     continue
 
-                if tile_data:
-                    if tile_data.startswith(b'\x1f\x8b'):
-                        tile_data = gzip.decompress(tile_data)
-                    decoded = mapbox_vector_tile.decode(tile_data)
-                    for layer_name in ['roads', 'buildings']:
-                        if layer_name in decoded:
-                            layer = decoded[layer_name]
-                            extent = layer.get('extent', 4096)
-                            nw_lat, nw_lon = self._tile_nw(x, y, zoom)
-                            se_lat, se_lon = self._tile_nw(x + 1, y + 1, zoom)
-                            x_scale = (se_lon - nw_lon) / extent
-                            y_scale = (se_lat - nw_lat) / extent
-                            for feature in layer['features']:
-                                properties = feature['properties']
-                                if layer_name == 'roads':
-                                    properties['highway'] = (
-                                        properties.get('pmap:kind_detail') or
-                                        properties.get('pmap:kind') or
-                                        properties.get('kind_detail') or
-                                        properties.get('kind') or
-                                        'residential'
-                                    )
-                                elif layer_name == 'buildings':
-                                    properties['building'] = 'yes'
+                for layer_name in ['roads', 'buildings']:
+                    if layer_name in decoded:
+                        layer = decoded[layer_name]
+                        extent = layer.get('extent', 4096)
+                        tile_bounds = self._tile_bounds(tile)
+                        x_scale = (tile_bounds.east - tile_bounds.west) / extent
+                        y_scale = (tile_bounds.south - tile_bounds.north) / extent
+                        for feature in layer['features']:
+                            properties = dict(feature['properties'])
+                            if layer_name == 'roads':
+                                if not self._include_road_feature(properties):
+                                    continue
+                                properties['highway'] = properties['pmap:kind']
+                            elif layer_name == 'buildings':
+                                properties['building'] = 'yes'
 
-                                geom = shape(feature['geometry'])
-                                geom_transformed = affine_transform(geom, [x_scale, 0, 0, y_scale, nw_lon, nw_lat])
-                                all_features.append({
-                                    'geometry': geom_transformed,
-                                    'properties': properties
-                                })
+                            geom = shape(feature['geometry'])
+                            geom_transformed = affine_transform(
+                                geom,
+                                [
+                                    x_scale,
+                                    0,
+                                    0,
+                                    y_scale,
+                                    tile_bounds.west,
+                                    tile_bounds.north,
+                                ],
+                            )
+                            all_features.append({
+                                'geometry': geom_transformed,
+                                'properties': properties
+                            })
 
         if not all_features:
             return gpd.GeoDataFrame(columns=['geometry'], crs="EPSG:4326")

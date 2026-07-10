@@ -67,6 +67,35 @@ def test_generate_protoblocks_with_bbox(osm_sample_gdf):
     assert protoblocks_gdf.crs is not None
 
 
+def test_generate_protoblocks_explodes_multilinestring_roads(test_polygon_gdf):
+    """MultiLineString roads should be split into linework before polygonization."""
+    from shapely.geometry import LineString, MultiLineString
+
+    streets = [
+        MultiLineString([
+            LineString([(-72.530, 42.370), (-72.520, 42.370)]),
+            LineString([(-72.530, 42.380), (-72.520, 42.380)]),
+            LineString([(-72.530, 42.370), (-72.530, 42.380)]),
+            LineString([(-72.520, 42.370), (-72.520, 42.380)]),
+        ])
+    ]
+    osm_gdf = gpd.GeoDataFrame(
+        {
+            "highway": ["residential"],
+            "geometry": streets,
+        },
+        crs="EPSG:4326",
+    )
+
+    protoblocks_gdf = generate_protoblocks(
+        input_polygon_gdf=test_polygon_gdf,
+        osm_gdf=osm_gdf,
+    )
+
+    assert isinstance(protoblocks_gdf, gpd.GeoDataFrame)
+    assert not protoblocks_gdf.empty
+
+
 def test_polygonize_clip_geom_uses_target_crs_bounds():
     """The polygonization closure boundary must be built in the line-network CRS."""
     bbox = (-49.28, -25.44, -49.26, -25.42)

@@ -87,6 +87,10 @@ default_widths = {
     "unclassified": 4.0,
     # unclear/uncanny/rare cases:
     "road": 6.0,
+    # Protomaps road classes from pmap:kind
+    "major_road": 12.0,
+    "medium_road": 8.0,
+    "minor_road": 6.0,
     "living_street": 0.0,
     # links:
     "trunk_link": 0,

@@ -1,0 +1,8 @@
+{
+"type": "FeatureCollection",
+"name": "curitiba_1km_random_boxes",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:OGC:1.3:CRS84" } },
+"features": [
+{ "type": "Feature", "properties": { "box_id": 1 }, "geometry": { "type": "Polygon", "coordinates": [ [ [ -49.26200125228349, -25.464620835245928 ], [ -49.262130939195984, -25.455594477856863 ], [ -49.27207321600627, -25.455711853354472 ], [ -49.271944270124592, -25.464738258202214 ], [ -49.26200125228349, -25.464620835245928 ] ] ] } }
+]
+}

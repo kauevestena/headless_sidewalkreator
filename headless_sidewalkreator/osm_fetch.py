@@ -85,8 +85,15 @@ def get_osm_data(
         downloader = OvertureDownloader(**kwargs)
         return downloader.get_data(bbox, tags)
     elif provider == "protomaps":
-        downloader = ProtomapsDownloader(**kwargs)
-        return downloader.get_data(bbox, tags)
+        protomaps_kwargs = dict(kwargs)
+        downloader = ProtomapsDownloader(url=protomaps_kwargs.pop("url", None))
+        return downloader.get_data(
+            bbox,
+            tags,
+            timeout=timeout,
+            max_retries=max_retries,
+            **protomaps_kwargs,
+        )
 
     # Default to OSMnx
     north, south, east, west = _normalize_bbox(bbox)

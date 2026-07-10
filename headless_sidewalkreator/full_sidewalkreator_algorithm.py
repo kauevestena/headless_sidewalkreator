@@ -106,7 +106,11 @@ def _preprocess_osm_data(
     logger.info("Step 6 complete")
 
     # 7. Split lines at intersections
-    lines_gdf = cleaned_gdf[cleaned_gdf.geometry.type == "LineString"].copy()
+    linework_gdf = cleaned_gdf[
+        cleaned_gdf.geometry.geom_type.isin(["LineString", "MultiLineString"])
+    ].copy()
+    lines_gdf = linework_gdf.explode(index_parts=False, ignore_index=True)
+    lines_gdf = lines_gdf[lines_gdf.geometry.type == "LineString"].copy()
     splitted_gdf = split_lines_at_intersections(lines_gdf)
     logger.info("Step 7 complete")
 

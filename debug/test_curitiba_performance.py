@@ -2,11 +2,43 @@ import os
 import time
 import pandas as pd
 import geopandas as gpd
-import matplotlib.pyplot as plt
-from shapely.ops import unary_union
 import osmnx as ox
 from headless_sidewalkreator import generate_protoblocks
+from headless_sidewalkreator.generic_functions import clip_gdf
 from headless_sidewalkreator.osm_fetch import get_osm_data
+
+try:
+    import matplotlib.pyplot as plt
+except ModuleNotFoundError:
+    plt = None
+
+
+def _extract_road_lines(
+    osm_gdf: gpd.GeoDataFrame,
+    clip_geom: gpd.GeoDataFrame,
+) -> gpd.GeoDataFrame:
+    if osm_gdf is None or osm_gdf.empty:
+        return gpd.GeoDataFrame(geometry=[], crs=clip_geom.crs)
+
+    roads_gdf = osm_gdf.copy()
+    if roads_gdf.crs is None:
+        roads_gdf = roads_gdf.set_crs("EPSG:4326")
+
+    if "highway" in roads_gdf.columns:
+        roads_gdf = roads_gdf[roads_gdf["highway"].notna()].copy()
+
+    roads_gdf = roads_gdf[
+        roads_gdf.geometry.geom_type.isin(["LineString", "MultiLineString"])
+    ].copy()
+
+    if roads_gdf.empty:
+        return gpd.GeoDataFrame(geometry=[], crs=osm_gdf.crs or "EPSG:4326")
+
+    try:
+        return clip_gdf(roads_gdf, clip_geom)
+    except Exception:
+        return roads_gdf
+
 
 def main():
     print("======================================================================")
@@ -24,7 +56,6 @@ def main():
         print(f"   Error geocoding Curitiba, Brazil: {e}")
         return
 
-    municipality_geom = curitiba_gdf.geometry.iloc[0]
     bbox = curitiba_gdf.total_bounds  # minx, miny, maxx, maxy
     print(f"   Bounding Box: {bbox}")
 
@@ -48,7 +79,10 @@ def main():
             if osm_gdf is not None and not osm_gdf.empty:
                 duration_fetch = time.time() - start_fetch
                 chosen_provider = provider
-                print(f"   Successfully fetched {len(osm_gdf)} features in {duration_fetch:.2f} seconds using '{provider}'.")
+                print(
+                    f"   Successfully fetched {len(osm_gdf)} features in "
+                    f"{duration_fetch:.2f} seconds using '{provider}'."
+                )
                 break
             else:
                 print(f"   Provider '{provider}' returned empty data.")
@@ -81,11 +115,18 @@ def main():
     print("\n4. Exporting results...")
     os.makedirs("debug", exist_ok=True)
     parquet_path = "debug/curitiba_municipality_protoblocks.parquet"
+    wgs84_path = "debug/curitiba_municipality_protoblocks_wgs84.geojson"
     try:
         protoblocks_gdf.to_parquet(parquet_path)
         print(f"   Successfully saved {count} protoblocks to {parquet_path}.")
     except Exception as e:
         print(f"   Error saving GeoParquet: {e}")
+
+    try:
+        protoblocks_gdf.to_crs("EPSG:4326").to_file(wgs84_path, driver="GeoJSON")
+        print(f"   Successfully saved WGS84 protoblocks to {wgs84_path}.")
+    except Exception as e:
+        print(f"   Error saving WGS84 GeoJSON: {e}")
 
     # 5. Correctness & Quality Metrics
     print("\n5. Computing Quality & Correctness Metrics...")
@@ -122,17 +163,48 @@ def main():
 
     # 6. Plotting
     print("\n6. Plotting and saving illustration...")
-    try:
-        fig, ax = plt.subplots(figsize=(12, 12))
-        curitiba_gdf.plot(ax=ax, facecolor='none', edgecolor='red', linewidth=2, label="Municipality Boundary")
-        protoblocks_gdf.plot(ax=ax, alpha=0.6, edgecolor='blue', facecolor='cyan', label="Protoblocks")
-        ax.set_title(f"Protoblocks for Curitiba Municipality (Count: {count})")
-        img_path = "debug/curitiba_municipality_illustration.png"
-        plt.savefig(img_path, dpi=150)
-        plt.close()
-        print(f"   Illustration saved to {img_path}.")
-    except Exception as e:
-        print(f"   Error generating illustration: {e}")
+    if plt is None:
+        print("   Skipping illustration because matplotlib is not installed.")
+    else:
+        try:
+            plot_crs = protoblocks_gdf.crs or "EPSG:32722"
+            plot_curitiba = curitiba_gdf.to_crs(plot_crs)
+            plot_protoblocks = protoblocks_gdf.to_crs(plot_crs)
+            plot_roads = _extract_road_lines(osm_gdf, curitiba_gdf)
+            if not plot_roads.empty:
+                plot_roads = plot_roads.to_crs(plot_crs)
+
+            fig, ax = plt.subplots(figsize=(12, 12))
+            plot_protoblocks.plot(
+                ax=ax,
+                alpha=0.45,
+                edgecolor="blue",
+                facecolor="cyan",
+                linewidth=0.35,
+                label="Protoblocks",
+            )
+            if not plot_roads.empty:
+                plot_roads.plot(
+                    ax=ax,
+                    color="black",
+                    linewidth=0.2,
+                    alpha=0.45,
+                    label="Fetched Roads",
+                )
+            plot_curitiba.boundary.plot(
+                ax=ax,
+                color="red",
+                linewidth=1.5,
+                label="Municipality Boundary",
+            )
+            ax.set_aspect("equal")
+            ax.set_title(f"Protoblocks for Curitiba Municipality (Count: {count})")
+            img_path = "debug/curitiba_municipality_illustration.png"
+            plt.savefig(img_path, dpi=150)
+            plt.close()
+            print(f"   Illustration saved to {img_path}.")
+        except Exception as e:
+            print(f"   Error generating illustration: {e}")
 
     # 7. Generate report
     print("\n7. Generating performance report...")

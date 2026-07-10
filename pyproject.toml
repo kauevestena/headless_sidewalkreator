@@ -32,6 +32,8 @@ dependencies = [
   "duckdb>=1.0.0",
   "pmtiles>=3.0.0",
   "mapbox-vector-tile>=2.0.0",
+  "mercantile>=1.2.1",
+  "tqdm>=4.66",
   "requests>=2.30",
 ]
 

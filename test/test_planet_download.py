@@ -22,4 +22,9 @@ def test_get_osm_data_protomaps_provider(mock_protomaps):
     get_osm_data(bbox, provider="protomaps", url="http://custom.pmtiles")
 
     mock_protomaps.assert_called_once_with(url="http://custom.pmtiles")
-    mock_instance.get_data.assert_called_once_with(bbox, None)
+    mock_instance.get_data.assert_called_once_with(
+        bbox,
+        None,
+        timeout=60,
+        max_retries=2,
+    )
