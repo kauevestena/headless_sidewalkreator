@@ -113,11 +113,18 @@ def _preprocess_osm_data(
     return splitted_gdf, cleaned_gdf, clipped_reproj_gdf
 
 
-def _get_polygonize_clip_geom(input_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+def _get_polygonize_clip_geom(
+    input_gdf: gpd.GeoDataFrame,
+    target_crs=None,
+) -> gpd.GeoDataFrame:
     """Create a bounding box polygon for polygonization."""
     if input_gdf is not None and not input_gdf.empty:
+        clip_source_gdf = input_gdf
+        if target_crs is not None and clip_source_gdf.crs != target_crs:
+            clip_source_gdf = clip_source_gdf.to_crs(target_crs)
+
         # Create a bounding box polygon using the bounds of the input geometry
-        bbox_bounds = input_gdf.total_bounds
+        bbox_bounds = clip_source_gdf.total_bounds
         bbox_poly = Polygon([
             (bbox_bounds[0], bbox_bounds[1]),
             (bbox_bounds[2], bbox_bounds[1]),
@@ -125,8 +132,17 @@ def _get_polygonize_clip_geom(input_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
             (bbox_bounds[0], bbox_bounds[3]),
             (bbox_bounds[0], bbox_bounds[1])
         ])
-        return gpd.GeoDataFrame(geometry=[bbox_poly], crs=input_gdf.crs)
+        return gpd.GeoDataFrame(geometry=[bbox_poly], crs=clip_source_gdf.crs)
     return None
+
+
+def _generate_protoblocks_from_splitted_lines(
+    input_gdf: gpd.GeoDataFrame,
+    splitted_gdf: gpd.GeoDataFrame,
+) -> gpd.GeoDataFrame:
+    """Generate protoblocks from an already preprocessed line network."""
+    clip_geom = _get_polygonize_clip_geom(input_gdf, target_crs=splitted_gdf.crs)
+    return polygonize_lines_gdf(splitted_gdf, clip_geom=clip_geom)
 
 
 def _extract_poi_data(
@@ -334,8 +350,10 @@ def generate_protoblocks(
         run_params["fallback_default_width"],
     )
 
-    clip_geom = _get_polygonize_clip_geom(input_gdf)
-    protoblocks_gdf = polygonize_lines_gdf(splitted_gdf, clip_geom=clip_geom)
+    protoblocks_gdf = _generate_protoblocks_from_splitted_lines(
+        input_gdf,
+        splitted_gdf,
+    )
 
     logger.info("Step 8 complete")
     logger.info("Protoblocks generation complete")
@@ -420,12 +438,10 @@ def sidewalkreator(
 
     save_debug_layer(splitted_gdf, "sidewalkreator_splitted_lines")
 
-    # 8. Create protoblocks using the standalone generation logic
-    # Reuse generate_protoblocks directly since it now uses the same helpers
-    protoblocks_gdf = generate_protoblocks(
-        input_polygon_gdf=input_gdf,
-        osm_gdf=clipped_gdf,
-        parameters=run_params,
+    # 8. Create protoblocks from the line network already prepared above.
+    protoblocks_gdf = _generate_protoblocks_from_splitted_lines(
+        input_gdf,
+        splitted_gdf,
     )
     original_protoblocks_gdf = protoblocks_gdf.copy()
     logger.info("Step 8 complete")

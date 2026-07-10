@@ -2,9 +2,10 @@
 
 import geopandas as gpd
 import pytest
+from geopandas.testing import assert_geodataframe_equal
 from unittest.mock import patch
 from shapely.geometry import Polygon
-from headless_sidewalkreator import sidewalkreator
+from headless_sidewalkreator import generate_protoblocks, sidewalkreator
 from headless_sidewalkreator import parameters as params
 
 
@@ -44,6 +45,59 @@ def test_sidewalkreator_basic(osm_sample_gdf):
     for key in ['sidewalks', 'crossings', 'kerbs', 'protoblocks', 'intersection_points']:
         if not result[key].empty:
             assert result[key].crs is not None, f"{key} should have a CRS"
+
+
+def test_sidewalkreator_preprocesses_once_for_protoblocks(monkeypatch, osm_sample_gdf):
+    """Full pipeline should reuse its preprocessed lines for protoblocks."""
+    import headless_sidewalkreator.full_sidewalkreator_algorithm as algorithm
+
+    polygon = Polygon([(-1, -1), (-1, 2), (2, 2), (2, -1), (-1, -1)])
+    input_polygon_gdf = gpd.GeoDataFrame(geometry=[polygon], crs="EPSG:4326")
+
+    preprocess_calls = 0
+    original_preprocess = algorithm._preprocess_osm_data
+
+    def counted_preprocess(*args, **kwargs):
+        nonlocal preprocess_calls
+        preprocess_calls += 1
+        return original_preprocess(*args, **kwargs)
+
+    monkeypatch.setattr(algorithm, "_preprocess_osm_data", counted_preprocess)
+    monkeypatch.setattr(algorithm, "save_debug_layer", lambda *args, **kwargs: None)
+
+    result = algorithm.sidewalkreator(
+        input_polygon_gdf=input_polygon_gdf,
+        osm_gdf=osm_sample_gdf,
+        ignore_existing=True,
+    )
+
+    assert preprocess_calls == 1
+    assert isinstance(result["protoblocks"], gpd.GeoDataFrame)
+
+
+def test_sidewalkreator_protoblocks_match_standalone_api(monkeypatch, osm_sample_gdf):
+    """The full pipeline should expose the same protoblocks as the standalone API."""
+    import headless_sidewalkreator.full_sidewalkreator_algorithm as algorithm
+
+    polygon = Polygon([(-1, -1), (-1, 2), (2, 2), (2, -1), (-1, -1)])
+    input_polygon_gdf = gpd.GeoDataFrame(geometry=[polygon], crs="EPSG:4326")
+    monkeypatch.setattr(algorithm, "save_debug_layer", lambda *args, **kwargs: None)
+
+    standalone_protoblocks = generate_protoblocks(
+        input_polygon_gdf=input_polygon_gdf,
+        osm_gdf=osm_sample_gdf,
+    )
+    result = sidewalkreator(
+        input_polygon_gdf=input_polygon_gdf,
+        osm_gdf=osm_sample_gdf,
+        ignore_existing=True,
+    )
+
+    assert_geodataframe_equal(
+        standalone_protoblocks.reset_index(drop=True),
+        result["protoblocks"].reset_index(drop=True),
+        check_like=True,
+    )
 
 
 @pytest.mark.skip(reason="This test requires live OSM data and can be slow. Enable manually for integration testing.")

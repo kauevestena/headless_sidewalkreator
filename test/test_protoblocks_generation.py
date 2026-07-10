@@ -4,6 +4,7 @@ import geopandas as gpd
 import pytest
 from unittest.mock import patch
 from headless_sidewalkreator import generate_protoblocks
+from headless_sidewalkreator.full_sidewalkreator_algorithm import _get_polygonize_clip_geom
 from shapely.geometry import Polygon
 
 
@@ -64,6 +65,30 @@ def test_generate_protoblocks_with_bbox(osm_sample_gdf):
     assert isinstance(protoblocks_gdf, gpd.GeoDataFrame)
     assert not protoblocks_gdf.empty
     assert protoblocks_gdf.crs is not None
+
+
+def test_polygonize_clip_geom_uses_target_crs_bounds():
+    """The polygonization closure boundary must be built in the line-network CRS."""
+    bbox = (-49.28, -25.44, -49.26, -25.42)
+    polygon = Polygon([
+        (bbox[0], bbox[1]),
+        (bbox[0], bbox[3]),
+        (bbox[2], bbox[3]),
+        (bbox[2], bbox[1]),
+        (bbox[0], bbox[1]),
+    ])
+    input_gdf = gpd.GeoDataFrame(geometry=[polygon], crs="EPSG:4326")
+    target_crs = input_gdf.estimate_utm_crs()
+
+    clip_geom = _get_polygonize_clip_geom(input_gdf, target_crs=target_crs)
+    expected_bounds = input_gdf.to_crs(target_crs).total_bounds
+    minx, miny, maxx, maxy = expected_bounds
+
+    assert clip_geom.crs == target_crs
+    assert clip_geom.total_bounds == pytest.approx(expected_bounds)
+    assert clip_geom.geometry.area.iloc[0] == pytest.approx(
+        (maxx - minx) * (maxy - miny)
+    )
 
 
 @patch('headless_sidewalkreator.full_sidewalkreator_algorithm.fetch_street_network_for_bbox')
