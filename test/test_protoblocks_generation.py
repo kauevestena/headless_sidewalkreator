@@ -96,6 +96,49 @@ def test_generate_protoblocks_explodes_multilinestring_roads(test_polygon_gdf):
     assert not protoblocks_gdf.empty
 
 
+def test_generate_protoblocks_skips_redundant_polygonize_noding_by_default(
+    test_polygon_gdf,
+    osm_sample_gdf,
+):
+    """The generated linework is already noded before polygonization."""
+    with patch(
+        "headless_sidewalkreator.full_sidewalkreator_algorithm.polygonize_lines_gdf"
+    ) as mock_polygonize:
+        mock_polygonize.return_value = gpd.GeoDataFrame(
+            geometry=[test_polygon_gdf.geometry.iloc[0]],
+            crs=test_polygon_gdf.crs,
+        )
+
+        generate_protoblocks(
+            input_polygon_gdf=test_polygon_gdf,
+            osm_gdf=osm_sample_gdf,
+        )
+
+    assert mock_polygonize.call_args.kwargs["node_lines"] is False
+
+
+def test_generate_protoblocks_can_force_polygonize_renoding(
+    test_polygon_gdf,
+    osm_sample_gdf,
+):
+    """The old full renoding path remains available for diagnostics."""
+    with patch(
+        "headless_sidewalkreator.full_sidewalkreator_algorithm.polygonize_lines_gdf"
+    ) as mock_polygonize:
+        mock_polygonize.return_value = gpd.GeoDataFrame(
+            geometry=[test_polygon_gdf.geometry.iloc[0]],
+            crs=test_polygon_gdf.crs,
+        )
+
+        generate_protoblocks(
+            input_polygon_gdf=test_polygon_gdf,
+            osm_gdf=osm_sample_gdf,
+            parameters={"renode_before_polygonize": True},
+        )
+
+    assert mock_polygonize.call_args.kwargs["node_lines"] is True
+
+
 def test_polygonize_clip_geom_uses_target_crs_bounds():
     """The polygonization closure boundary must be built in the line-network CRS."""
     bbox = (-49.28, -25.44, -49.26, -25.42)

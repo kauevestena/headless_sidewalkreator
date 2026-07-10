@@ -7,6 +7,8 @@ import requests
 import gzip
 import mercantile
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock, local
 from tqdm import tqdm
 
 try:
@@ -57,6 +59,54 @@ class ProtomapsDownloader(PlanetDownloader):
             return tile_data
         raise ValueError(f"Unsupported Protomaps tile compression: {tile_compression}")
 
+    def _decode_tile_features(self, tile, tile_data, tile_compression):
+        x, y, z = tile
+        tile_data = self._decompress_tile(tile_data, tile_compression)
+        # Keep native MVT tile coordinates. The affine transform below maps the
+        # tile's Y-down coordinate space to lon/lat.
+        decoded = mapbox_vector_tile.decode(
+            tile_data,
+            default_options={"y_coord_down": True},
+        )
+
+        tile_features = []
+        for layer_name in ['roads', 'buildings']:
+            if layer_name not in decoded:
+                continue
+
+            layer = decoded[layer_name]
+            extent = layer.get('extent', 4096)
+            tile_bounds = self._tile_bounds(tile)
+            x_scale = (tile_bounds.east - tile_bounds.west) / extent
+            y_scale = (tile_bounds.south - tile_bounds.north) / extent
+            for feature in layer['features']:
+                properties = dict(feature['properties'])
+                if layer_name == 'roads':
+                    if not self._include_road_feature(properties):
+                        continue
+                    properties['highway'] = properties['pmap:kind']
+                elif layer_name == 'buildings':
+                    properties['building'] = 'yes'
+
+                geom = shape(feature['geometry'])
+                geom_transformed = affine_transform(
+                    geom,
+                    [
+                        x_scale,
+                        0,
+                        0,
+                        y_scale,
+                        tile_bounds.west,
+                        tile_bounds.north,
+                    ],
+                )
+                tile_features.append({
+                    'geometry': geom_transformed,
+                    'properties': properties
+                })
+
+        return tile_features
+
     def get_data(
         self,
         bbox: Tuple[float, float, float, float],
@@ -73,22 +123,37 @@ class ProtomapsDownloader(PlanetDownloader):
         max_retries = kwargs.get('max_retries', 2)
         show_progress = kwargs.get('show_progress', True)
         tiles = self._tiles_for_bbox(bbox, zoom)
+        tile_workers = int(
+            kwargs.get(
+                'tile_workers',
+                kwargs.get('max_workers', min(8, max(1, len(tiles)))),
+            )
+        )
+        tile_workers = max(1, tile_workers)
 
         logger.info(
-            "Fetching %s tiles for bbox %s at zoom %s",
+            "Fetching %s tiles for bbox %s at zoom %s with %s worker(s)",
             len(tiles),
             bbox,
             zoom,
+            tile_workers,
         )
 
         all_features = []
-        session = requests.Session()
+        thread_state = local()
         range_cache = {}
+        range_cache_lock = Lock()
+
+        def get_session():
+            if not hasattr(thread_state, "session"):
+                thread_state.session = requests.Session()
+            return thread_state.session
 
         def remote_get(offset, length):
             cache_key = (offset, length)
-            if cache_key in range_cache:
-                return range_cache[cache_key]
+            with range_cache_lock:
+                if cache_key in range_cache:
+                    return range_cache[cache_key]
 
             headers = {
                 "Range": f"bytes={offset}-{offset + length - 1}",
@@ -97,7 +162,7 @@ class ProtomapsDownloader(PlanetDownloader):
             last_exc = None
             for attempt in range(max_retries + 1):
                 try:
-                    resp = session.get(
+                    resp = get_session().get(
                         self.url,
                         headers=headers,
                         timeout=request_timeout,
@@ -113,8 +178,9 @@ class ProtomapsDownloader(PlanetDownloader):
                             f"Expected {length} bytes, got {len(resp.content)}",
                             response=resp,
                         )
-                    range_cache[cache_key] = resp.content
-                    return resp.content
+                    with range_cache_lock:
+                        range_cache.setdefault(cache_key, resp.content)
+                        return range_cache[cache_key]
                 except requests.RequestException as exc:
                     last_exc = exc
                     if attempt < max_retries:
@@ -128,70 +194,47 @@ class ProtomapsDownloader(PlanetDownloader):
             tile_compression = (
                 header.get("tile_compression") if isinstance(header, dict) else None
             )
+            if (
+                isinstance(header, dict)
+                and "root_offset" in header
+                and "root_length" in header
+            ):
+                remote_get(header["root_offset"], header["root_length"])
         except Exception as e:
             logger.error(f"Failed to read Protomaps PMTiles header: {e}")
             return gpd.GeoDataFrame(columns=['geometry'], crs="EPSG:4326")
 
-        tile_iter = tqdm(
-            tiles,
-            desc="Fetching Protomaps tiles",
-            unit="tile",
-            disable=not show_progress,
-        )
-
-        for tile in tile_iter:
+        def fetch_tile(tile):
             x, y, z = tile
             try:
                 tile_data = reader.get(z, x, y)
             except Exception as e:
                 logger.warning(f"Failed to fetch tile {z}/{x}/{y}: {e}")
-                continue
+                return []
 
             if tile_data:
                 try:
-                    tile_data = self._decompress_tile(tile_data, tile_compression)
-                    # Keep native MVT tile coordinates. The affine transform
-                    # below maps the tile's Y-down coordinate space to lon/lat.
-                    decoded = mapbox_vector_tile.decode(
+                    return self._decode_tile_features(
+                        tile,
                         tile_data,
-                        default_options={"y_coord_down": True},
+                        tile_compression,
                     )
                 except Exception as e:
                     logger.warning(f"Failed to decode tile {z}/{x}/{y}: {e}")
-                    continue
 
-                for layer_name in ['roads', 'buildings']:
-                    if layer_name in decoded:
-                        layer = decoded[layer_name]
-                        extent = layer.get('extent', 4096)
-                        tile_bounds = self._tile_bounds(tile)
-                        x_scale = (tile_bounds.east - tile_bounds.west) / extent
-                        y_scale = (tile_bounds.south - tile_bounds.north) / extent
-                        for feature in layer['features']:
-                            properties = dict(feature['properties'])
-                            if layer_name == 'roads':
-                                if not self._include_road_feature(properties):
-                                    continue
-                                properties['highway'] = properties['pmap:kind']
-                            elif layer_name == 'buildings':
-                                properties['building'] = 'yes'
+            return []
 
-                            geom = shape(feature['geometry'])
-                            geom_transformed = affine_transform(
-                                geom,
-                                [
-                                    x_scale,
-                                    0,
-                                    0,
-                                    y_scale,
-                                    tile_bounds.west,
-                                    tile_bounds.north,
-                                ],
-                            )
-                            all_features.append({
-                                'geometry': geom_transformed,
-                                'properties': properties
-                            })
+        with ThreadPoolExecutor(max_workers=min(tile_workers, len(tiles) or 1)) as executor:
+            futures = [executor.submit(fetch_tile, tile) for tile in tiles]
+            tile_iter = tqdm(
+                as_completed(futures),
+                total=len(futures),
+                desc="Fetching Protomaps tiles",
+                unit="tile",
+                disable=not show_progress,
+            )
+            for future in tile_iter:
+                all_features.extend(future.result())
 
         if not all_features:
             return gpd.GeoDataFrame(columns=['geometry'], crs="EPSG:4326")

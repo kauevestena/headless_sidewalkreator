@@ -48,6 +48,11 @@ dev = [
     "pytest-cov",
 ]
 
+performance = [
+    "matplotlib>=3.7",
+    "pyarrow>=14.0",
+]
+
 [project.scripts]
 sidewalkreator = "headless_sidewalkreator.main:main"
 

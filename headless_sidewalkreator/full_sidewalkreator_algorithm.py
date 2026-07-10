@@ -3,6 +3,8 @@
 This module exposes the sidewalkreator function - the modern GeoDataFrame-based API.
 """
 
+import time
+
 import geopandas as gpd
 import osmnx as ox
 from shapely.geometry import Polygon
@@ -29,6 +31,17 @@ from .logging_config import get_logger
 
 
 logger = get_logger(__name__)
+
+
+def _run_timed_stage(label: str, show_progress: bool, func, *args, **kwargs):
+    if show_progress:
+        print(f"   {label}...")
+    start = time.perf_counter()
+    result = func(*args, **kwargs)
+    if show_progress:
+        duration = time.perf_counter() - start
+        print(f"   {label} complete in {duration:.2f} seconds.")
+    return result
 
 
 def _resolve_input_area(
@@ -143,10 +156,15 @@ def _get_polygonize_clip_geom(
 def _generate_protoblocks_from_splitted_lines(
     input_gdf: gpd.GeoDataFrame,
     splitted_gdf: gpd.GeoDataFrame,
+    renode_before_polygonize: bool = False,
 ) -> gpd.GeoDataFrame:
     """Generate protoblocks from an already preprocessed line network."""
     clip_geom = _get_polygonize_clip_geom(input_gdf, target_crs=splitted_gdf.crs)
-    return polygonize_lines_gdf(splitted_gdf, clip_geom=clip_geom)
+    return polygonize_lines_gdf(
+        splitted_gdf,
+        clip_geom=clip_geom,
+        node_lines=renode_before_polygonize,
+    )
 
 
 def _extract_poi_data(
@@ -267,6 +285,7 @@ def _generate_crossings(
         ray_growth_factor=run_params["crossing_ray_growth_factor"],
         max_ray_iterations=run_params["crossing_max_ray_iterations"],
         node_precision=run_params["crossing_node_precision"],
+        show_progress=run_params.get("show_progress", False),
     )
     logger.info("Step 13 complete")
     return crossings_gdf
@@ -292,6 +311,7 @@ def _finalize_results(
         max_length=run_params["split_max_len"],
         num_segments=run_params["split_num_segments"],
         min_stretch_size=run_params["min_stretch_size"],
+        show_progress=run_params.get("show_progress", False),
     )
     logger.info("Step 14 complete")
 
@@ -340,6 +360,8 @@ def generate_protoblocks(
         "crossing_ray_growth_factor": params.crossing_ray_growth_factor,
         "crossing_max_ray_iterations": params.crossing_max_ray_iterations,
         "crossing_node_precision": params.crossing_node_precision,
+        "renode_before_polygonize": False,
+        "show_progress": False,
     }
 
     if parameters:
@@ -357,6 +379,7 @@ def generate_protoblocks(
     protoblocks_gdf = _generate_protoblocks_from_splitted_lines(
         input_gdf,
         splitted_gdf,
+        renode_before_polygonize=run_params["renode_before_polygonize"],
     )
 
     logger.info("Step 8 complete")
@@ -425,49 +448,104 @@ def sidewalkreator(
         "crossing_ray_growth_factor": params.crossing_ray_growth_factor,
         "crossing_max_ray_iterations": params.crossing_max_ray_iterations,
         "crossing_node_precision": params.crossing_node_precision,
+        "renode_before_polygonize": False,
+        "show_progress": False,
     }
 
     if parameters:
         run_params.update(parameters)
 
     # 1-7. Core preprocessing
-    input_gdf = _resolve_input_area(place_name, input_polygon_gdf, bbox)
-    clipped_gdf = _fetch_and_clip_osm(input_gdf, osm_gdf, run_params["timeout"], provider=run_params.get("provider"), **run_params.get("provider_kwargs", {}))
-    splitted_gdf, cleaned_gdf, clipped_reproj_gdf = _preprocess_osm_data(
+    show_progress = run_params.get("show_progress", False)
+    input_gdf = _run_timed_stage(
+        "Step 1: resolve input area",
+        show_progress,
+        _resolve_input_area,
+        place_name,
+        input_polygon_gdf,
+        bbox,
+    )
+    clipped_gdf = _run_timed_stage(
+        "Steps 2-4: fetch and clip OSM data",
+        show_progress,
+        _fetch_and_clip_osm,
+        input_gdf,
+        osm_gdf,
+        run_params["timeout"],
+        provider=run_params.get("provider"),
+        **run_params.get("provider_kwargs", {}),
+    )
+    splitted_gdf, cleaned_gdf, clipped_reproj_gdf = _run_timed_stage(
+        "Steps 5-7: reproject, clean, and split lines",
+        show_progress,
+        _preprocess_osm_data,
         clipped_gdf,
         input_gdf,
         run_params["default_widths"],
         run_params["fallback_default_width"],
     )
 
-    save_debug_layer(splitted_gdf, "sidewalkreator_splitted_lines")
+    _run_timed_stage(
+        "Debug: save split-line layer",
+        show_progress,
+        save_debug_layer,
+        splitted_gdf,
+        "sidewalkreator_splitted_lines",
+    )
 
     # 8. Create protoblocks from the line network already prepared above.
-    protoblocks_gdf = _generate_protoblocks_from_splitted_lines(
+    protoblocks_gdf = _run_timed_stage(
+        "Step 8: generate protoblocks",
+        show_progress,
+        _generate_protoblocks_from_splitted_lines,
         input_gdf,
         splitted_gdf,
+        renode_before_polygonize=run_params["renode_before_polygonize"],
     )
     original_protoblocks_gdf = protoblocks_gdf.copy()
     logger.info("Step 8 complete")
 
     # 9. Extract POI data
-    unified_pois_gdf, buildings_gdf = _extract_poi_data(cleaned_gdf, clipped_reproj_gdf)
+    unified_pois_gdf, buildings_gdf = _run_timed_stage(
+        "Step 9: extract POIs",
+        show_progress,
+        _extract_poi_data,
+        cleaned_gdf,
+        clipped_reproj_gdf,
+    )
 
     # 10. Draw sidewalks
-    sidewalks_gdf = _draw_sidewalks(splitted_gdf, buildings_gdf, cleaned_gdf, run_params)
+    sidewalks_gdf = _run_timed_stage(
+        "Step 10: draw sidewalks",
+        show_progress,
+        _draw_sidewalks,
+        splitted_gdf,
+        buildings_gdf,
+        cleaned_gdf,
+        run_params,
+    )
 
     # 11. Apply dead end removal
-    sidewalks_gdf = _apply_dead_end_removal(
+    sidewalks_gdf = _run_timed_stage(
+        "Step 11: remove dead ends",
+        show_progress,
+        _apply_dead_end_removal,
         sidewalks_gdf, ignore_existing, run_params["dead_end_removal_iterations"]
     )
 
     # 12-13. Generate crossings
-    crossings_gdf = _generate_crossings(
+    crossings_gdf = _run_timed_stage(
+        "Steps 12-13: filter protoblocks and generate crossings",
+        show_progress,
+        _generate_crossings,
         splitted_gdf, sidewalks_gdf, protoblocks_gdf, run_params, ignore_existing
     )
 
     # 14-15. Finalize results
-    splitted_sidewalks_gdf, kerbs_gdf, intersection_points_gdf = _finalize_results(
+    splitted_sidewalks_gdf, kerbs_gdf, intersection_points_gdf = _run_timed_stage(
+        "Steps 14-15: split sidewalks and generate kerbs",
+        show_progress,
+        _finalize_results,
         sidewalks_gdf,
         crossings_gdf,
         original_protoblocks_gdf,

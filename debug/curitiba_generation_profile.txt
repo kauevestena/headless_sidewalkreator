@@ -1,0 +1,48 @@
+         6164404 function calls (6127136 primitive calls) in 439.774 seconds
+
+   Ordered by: cumulative time
+   List reduced from 889 to 40 due to restriction <40>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+      2/1    0.142    0.071  439.657  439.657 full_sidewalkreator_algorithm.py:304(generate_protoblocks)
+        1    0.109    0.109  419.098  419.098 full_sidewalkreator_algorithm.py:143(_generate_protoblocks_from_splitted_lines)
+        1    0.775    0.775  418.969  418.969 generic_functions.py:224(polygonize_lines_gdf)
+        5    0.000    0.000  396.653   79.331 base.py:2501(union_all)
+        5    0.001    0.000  396.652   79.330 array.py:948(union_all)
+       43    0.001    0.000  391.527    9.105 threading.py:637(wait)
+       43    0.001    0.000  391.526    9.105 threading.py:323(wait)
+      175  391.524    2.237  391.524    2.237 {method 'acquire' of '_thread.lock' objects}
+695344/695343    5.088    0.000   33.382    0.000 decorators.py:73(wrapped)
+71655/35834    0.349    0.000   21.056    0.001 decorators.py:171(wrapper)
+        1    0.000    0.000   14.355   14.355 full_sidewalkreator_algorithm.py:66(_fetch_and_clip_osm)
+        1    0.000    0.000   14.355   14.355 generic_functions.py:195(clip_gdf)
+        1    0.002    0.002   14.348   14.348 clip.py:108(clip)
+        1    0.000    0.000   14.265   14.265 clip.py:41(_clip_gdf_with_mask)
+        1    0.000    0.000   14.262   14.262 array.py:841(intersection)
+        1    7.869    7.869   14.262   14.262 array.py:767(_binary_method)
+    17911    9.776    0.001    9.776    0.001 set_operations.py:112(intersection)
+        1    0.077    0.077    6.175    6.175 full_sidewalkreator_algorithm.py:88(_preprocess_osm_data)
+    17911    0.279    0.000    5.460    0.000 base.py:462(buffer)
+        1    0.093    0.093    5.326    5.326 generic_functions.py:391(split_lines_at_intersections)
+        5    5.050    1.010    5.050    1.010 set_operations.py:463(union_all)
+   217058    0.216    0.000    4.994    0.000 base.py:1096(__iter__)
+   217055    0.322    0.000    4.775    0.000 base.py:1093(_get_geom_item)
+    17911    3.752    0.000    4.120    0.000 constructive.py:136(buffer)
+    17910    0.057    0.000    3.887    0.000 base.py:668(intersection)
+        1    0.121    0.121    3.633    3.633 ops.py:48(polygonize)
+    99716    2.116    0.000    2.626    0.000 _geometry.py:867(set_precision)
+   199429    0.320    0.000    2.601    0.000 base.py:721(is_empty)
+   217055    2.503    0.000    2.503    0.000 _geometry.py:594(get_geometry)
+    53730    0.160    0.000    1.293    0.000 base.py:351(length)
+1604271/1604194    0.839    0.000    1.248    0.000 {built-in method builtins.isinstance}
+   199430    1.176    0.000    1.176    0.000 predicates.py:181(is_empty)
+        1    1.149    1.149    1.149    1.149 constructive.py:895(polygonize)
+    17910    0.061    0.000    0.946    0.000 base.py:772(contains)
+    35821    0.070    0.000    0.782    0.000 polygon.py:251(exterior)
+    99715    0.088    0.000    0.734    0.000 base.py:489(__iter__)
+    99715    0.119    0.000    0.646    0.000 array.py:424(__getitem__)
+    53730    0.644    0.000    0.644    0.000 measurement.py:166(length)
+        4    0.000    0.000    0.552    0.138 _compat.py:78(wrapper)
+    17910    0.535    0.000    0.535    0.000 predicates.py:551(contains)
+
+

@@ -12,6 +12,7 @@ import pandas as pd
 import geopandas as gpd
 from typing import Optional, List, Tuple
 import shapely
+from tqdm import tqdm
 from shapely.geometry import (
     LineString,
     MultiLineString,
@@ -25,6 +26,12 @@ from .logging_config import get_logger
 
 
 logger = get_logger(__name__)
+
+
+def _maybe_tqdm(iterable, show_progress: bool, **kwargs):
+    if show_progress:
+        return tqdm(iterable, **kwargs)
+    return iterable
 
 
 def read_input_polygon(filepath: str) -> gpd.GeoDataFrame:
@@ -221,7 +228,11 @@ def reproject_gdf(gdf: gpd.GeoDataFrame, target_crs: str) -> gpd.GeoDataFrame:
 from shapely.ops import polygonize, polygonize_full
 
 
-def polygonize_lines_gdf(gdf: gpd.GeoDataFrame, clip_geom: gpd.GeoDataFrame = None) -> gpd.GeoDataFrame:
+def polygonize_lines_gdf(
+    gdf: gpd.GeoDataFrame,
+    clip_geom: gpd.GeoDataFrame = None,
+    node_lines: bool = True,
+) -> gpd.GeoDataFrame:
     """Polygonizes lines in a GeoDataFrame.
 
     This function takes a GeoDataFrame of lines and creates polygons from them.
@@ -229,6 +240,8 @@ def polygonize_lines_gdf(gdf: gpd.GeoDataFrame, clip_geom: gpd.GeoDataFrame = No
     Args:
         gdf: A GeoDataFrame containing LineString geometries.
         clip_geom: An optional GeoDataFrame containing the clipping geometry to close edge blocks.
+        node_lines: Whether to node/split linework with union_all before polygonize.
+            Set to False only when the caller already provides noded linework.
 
     Returns:
         A new GeoDataFrame containing the polygonized geometries.
@@ -258,22 +271,38 @@ def polygonize_lines_gdf(gdf: gpd.GeoDataFrame, clip_geom: gpd.GeoDataFrame = No
                     for interior in poly.interiors:
                         lines.append(interior)
 
-    # Noding lines via union_all
+    # Noding lines via union_all. This is expensive, so internal callers that
+    # already pass split/noded linework can skip it.
     from shapely import set_precision
     lines = [set_precision(line, 1e-4) for line in lines]
-    merged_lines = gpd.GeoSeries(lines, crs=gdf.crs).union_all()
+    if node_lines:
+        polygonize_input = gpd.GeoSeries(lines, crs=gdf.crs).union_all()
+    else:
+        polygonize_input = lines
 
     # Try polygonize on the noded geometry
-    polygons = list(polygonize(merged_lines))
+    polygons = list(polygonize(polygonize_input))
     logger.info("Number of polygons found: %s", len(polygons))
 
     if not polygons:
         # Use polygonize_full to get polygons even when dangles/cuts exist
         try:
-            polys, dangles, cuts, invalids = polygonize_full(merged_lines)
+            polys, dangles, cuts, invalids = polygonize_full(polygonize_input)
             polygons = list(polys)
         except Exception:
             polygons = []
+
+    if not polygons and not node_lines:
+        logger.info("Fast polygonize returned no polygons; retrying with noded linework")
+        polygonize_input = gpd.GeoSeries(lines, crs=gdf.crs).union_all()
+        polygons = list(polygonize(polygonize_input))
+        logger.info("Number of polygons found after renoding: %s", len(polygons))
+        if not polygons:
+            try:
+                polys, dangles, cuts, invalids = polygonize_full(polygonize_input)
+                polygons = list(polys)
+            except Exception:
+                polygons = []
 
     # If we added the bounding box exterior, we must remove the "outside" polygon
     # that is formed by the bounding box and the lines, as well as ensure we only
@@ -1095,6 +1124,7 @@ def draw_crossings_gdf(
     ray_growth_factor: float = 2.0,
     max_ray_iterations: int = 5,
     node_precision: int = 6,
+    show_progress: bool = False,
 ) -> gpd.GeoDataFrame:
     """Generate crossings following the documented Sidewalkreator procedure."""
 
@@ -1146,7 +1176,14 @@ def draw_crossings_gdf(
     segment_nodes: dict[int, dict] = {}
 
 
-    for row in streets_gdf.itertuples():
+    street_rows = _maybe_tqdm(
+        streets_gdf.itertuples(),
+        show_progress,
+        total=len(streets_gdf),
+        desc="Crossings: indexing street segments",
+        unit="feature",
+    )
+    for row in street_rows:
         idx = row.Index
         geom = row.geometry
         if geom is None or geom.is_empty:
@@ -1190,7 +1227,15 @@ def draw_crossings_gdf(
     pairs = sindex.query(segment_series, predicate="intersects")
 
 
-    for idx1, idx2 in zip(*pairs):
+    pair_count = len(pairs[0]) if len(pairs) else 0
+    pair_iter = _maybe_tqdm(
+        zip(*pairs),
+        show_progress,
+        total=pair_count,
+        desc="Crossings: segment intersections",
+        unit="pair",
+    )
+    for idx1, idx2 in pair_iter:
         if idx1 >= idx2:
             continue
         line1 = segment_series.loc[idx1]
@@ -1238,7 +1283,14 @@ def draw_crossings_gdf(
 
     records = []
 
-    for idx, info in segment_info.items():
+    segment_iter = _maybe_tqdm(
+        segment_info.items(),
+        show_progress,
+        total=len(segment_info),
+        desc="Crossings: casting candidates",
+        unit="segment",
+    )
+    for idx, info in segment_iter:
         line = info["geometry"]
         segment_width = info["width"]
         base_length = segment_width + extra_length
@@ -1842,6 +1894,7 @@ def split_sidewalks_gdf(
     max_length: float = None,
     num_segments: int = None,
     min_stretch_size: float = None,
+    show_progress: bool = False,
 ) -> gpd.GeoDataFrame:
     """Splits sidewalks based on multiple criteria.
 
@@ -1879,7 +1932,14 @@ def split_sidewalks_gdf(
 
     # Split the sidewalks (defensive: handle different geom types and empty splitter)
     new_sidewalks = []
-    for geom in sidewalks_gdf.geometry:
+    sidewalk_iter = _maybe_tqdm(
+        sidewalks_gdf.geometry,
+        show_progress,
+        total=len(sidewalks_gdf),
+        desc="Splitting sidewalks at crossings",
+        unit="sidewalk",
+    )
+    for geom in sidewalk_iter:
         if geom is None or geom.is_empty:
             continue
 

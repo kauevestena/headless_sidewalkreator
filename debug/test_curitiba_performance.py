@@ -12,6 +12,8 @@ try:
 except ModuleNotFoundError:
     plt = None
 
+PERFORMANCE_EXTRAS_HINT = "Install with: pip install -e '.[performance]'"
+
 
 def _extract_road_lines(
     osm_gdf: gpd.GeoDataFrame,
@@ -121,6 +123,7 @@ def main():
         print(f"   Successfully saved {count} protoblocks to {parquet_path}.")
     except Exception as e:
         print(f"   Error saving GeoParquet: {e}")
+        print(f"   Optional performance dependency missing? {PERFORMANCE_EXTRAS_HINT}")
 
     try:
         protoblocks_gdf.to_crs("EPSG:4326").to_file(wgs84_path, driver="GeoJSON")
@@ -165,6 +168,7 @@ def main():
     print("\n6. Plotting and saving illustration...")
     if plt is None:
         print("   Skipping illustration because matplotlib is not installed.")
+        print(f"   Optional performance dependency missing? {PERFORMANCE_EXTRAS_HINT}")
     else:
         try:
             plot_crs = protoblocks_gdf.crs or "EPSG:32722"
