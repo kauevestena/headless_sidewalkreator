@@ -173,3 +173,4 @@ test/__pycache__/
 cache/
 .vscode/settings.json
 debug_layers/
+scratchpad
