@@ -9,6 +9,9 @@ import math
 import os
 import json
 import time
+import heapq
+from concurrent.futures import ThreadPoolExecutor
+import numpy as np
 import pandas as pd
 import geopandas as gpd
 from typing import Optional, List, Tuple
@@ -33,8 +36,135 @@ logger = get_logger(__name__)
 
 def _maybe_tqdm(iterable, show_progress: bool, **kwargs):
     if show_progress:
+        kwargs.setdefault("position", 1)
+        kwargs.setdefault("leave", False)
+        kwargs.setdefault("dynamic_ncols", True)
         return tqdm(iterable, **kwargs)
     return iterable
+
+
+def _parallel_buffer(
+    geometries: np.ndarray,
+    distances,
+    *,
+    quad_segs: int,
+    min_parallel_size: int = 2_000,
+) -> np.ndarray:
+    """Buffer independent geometries in deterministic ordered chunks."""
+    geometries = np.asarray(geometries, dtype=object)
+    worker_count = min(8, os.cpu_count() or 1)
+    if worker_count <= 1 or len(geometries) < min_parallel_size:
+        return shapely.buffer(geometries, distances, quad_segs=quad_segs)
+
+    distance_array = np.asarray(distances)
+    indexes_by_chunk = [
+        indexes
+        for indexes in np.array_split(np.arange(len(geometries)), worker_count)
+        if len(indexes)
+    ]
+
+    def buffer_chunk(indexes):
+        chunk_distances = (
+            distances if distance_array.ndim == 0 else distance_array[indexes]
+        )
+        return shapely.buffer(
+            geometries[indexes],
+            chunk_distances,
+            quad_segs=quad_segs,
+        )
+
+    with ThreadPoolExecutor(max_workers=len(indexes_by_chunk)) as executor:
+        return np.concatenate(list(executor.map(buffer_chunk, indexes_by_chunk)))
+
+
+def _parallel_simplify(
+    geometries: np.ndarray,
+    tolerance: float,
+    *,
+    preserve_topology: bool,
+    min_parallel_size: int = 2_000,
+) -> np.ndarray:
+    """Simplify independent geometries in deterministic ordered chunks."""
+    worker_count = min(8, os.cpu_count() or 1)
+    if worker_count <= 1 or len(geometries) < min_parallel_size:
+        return shapely.simplify(
+            geometries,
+            tolerance,
+            preserve_topology=preserve_topology,
+        )
+    chunks = [chunk for chunk in np.array_split(geometries, worker_count) if len(chunk)]
+    with ThreadPoolExecutor(max_workers=len(chunks)) as executor:
+        return np.concatenate(
+            list(
+                executor.map(
+                    lambda chunk: shapely.simplify(
+                        chunk,
+                        tolerance,
+                        preserve_topology=preserve_topology,
+                    ),
+                    chunks,
+                )
+            )
+        )
+
+
+def _parallel_union_rows(
+    geometries: np.ndarray,
+    min_parallel_size: int = 1_000,
+) -> np.ndarray:
+    """Apply union_all to each matrix row in parallel while retaining order."""
+    worker_count = min(8, os.cpu_count() or 1)
+    if worker_count <= 1 or len(geometries) < min_parallel_size:
+        return shapely.union_all(geometries, axis=1)
+    chunks = [chunk for chunk in np.array_split(geometries, worker_count) if len(chunk)]
+    with ThreadPoolExecutor(max_workers=len(chunks)) as executor:
+        return np.concatenate(
+            list(executor.map(lambda chunk: shapely.union_all(chunk, axis=1), chunks))
+        )
+
+
+def _parallel_difference(
+    left: np.ndarray,
+    right: np.ndarray,
+    min_parallel_size: int = 2_000,
+) -> np.ndarray:
+    """Difference aligned geometry arrays in deterministic ordered chunks."""
+    worker_count = min(8, os.cpu_count() or 1)
+    if worker_count <= 1 or len(left) < min_parallel_size:
+        return shapely.difference(left, right)
+    indexes_by_chunk = [
+        indexes
+        for indexes in np.array_split(np.arange(len(left)), worker_count)
+        if len(indexes)
+    ]
+    with ThreadPoolExecutor(max_workers=len(indexes_by_chunk)) as executor:
+        return np.concatenate(
+            list(
+                executor.map(
+                    lambda indexes: shapely.difference(
+                        left[indexes],
+                        right[indexes],
+                    ),
+                    indexes_by_chunk,
+                )
+            )
+        )
+
+
+def _parallel_intersection(
+    left: np.ndarray,
+    right,
+    min_parallel_size: int = 1_000,
+) -> np.ndarray:
+    """Intersect geometries with a shared mask in ordered GEOS chunks."""
+    worker_count = min(8, os.cpu_count() or 1)
+    if worker_count <= 1 or len(left) < min_parallel_size:
+        return shapely.intersection(left, right)
+    chunks = [chunk for chunk in np.array_split(left, worker_count) if len(chunk)]
+    with ThreadPoolExecutor(max_workers=len(chunks)) as executor:
+        return np.concatenate(
+            list(executor.map(lambda chunk: shapely.intersection(chunk, right), chunks))
+        )
 
 
 def read_input_polygon(filepath: str) -> gpd.GeoDataFrame:
@@ -140,7 +270,6 @@ def grid_lines(width: int, height: int):
     return lines
 
 
-import osmnx as ox
 from .osm_fetch import get_osm_data
 
 
@@ -212,7 +341,43 @@ def clip_gdf(gdf: gpd.GeoDataFrame, clip_geom: gpd.GeoDataFrame) -> gpd.GeoDataF
     Returns:
         A new GeoDataFrame containing the clipped geometries.
     """
-    return gpd.clip(gdf, clip_geom)
+    source_attrs = dict(gdf.attrs)
+    if gdf.empty or clip_geom is None or clip_geom.empty:
+        result = gdf.iloc[0:0].copy()
+        result.attrs.update(source_attrs)
+        return result
+
+    if gdf.crs is not None and clip_geom.crs is not None and gdf.crs != clip_geom.crs:
+        clip_geom = clip_geom.to_crs(gdf.crs)
+    mask = shapely.union_all(np.asarray(clip_geom.geometry.array, dtype=object))
+    if mask is None or mask.is_empty:
+        result = gdf.iloc[0:0].copy()
+        result.attrs.update(source_attrs)
+        return result
+
+    candidate_indexes = np.asarray(
+        gdf.sindex.query(mask, predicate="intersects"),
+        dtype=int,
+    )
+    if len(candidate_indexes) == 0:
+        result = gdf.iloc[0:0].copy()
+        result.attrs.update(source_attrs)
+        return result
+
+    candidate_indexes.sort()
+    result = gdf.iloc[candidate_indexes].copy()
+    geometries = np.asarray(result.geometry.array, dtype=object)
+    boundary_crossing = ~shapely.covered_by(geometries, mask)
+    if np.any(boundary_crossing):
+        geometries[boundary_crossing] = _parallel_intersection(
+            geometries[boundary_crossing],
+            mask,
+        )
+    keep = ~shapely.is_missing(geometries) & ~shapely.is_empty(geometries)
+    result = result.iloc[np.flatnonzero(keep)].copy()
+    result.geometry = geometries[keep]
+    result.attrs.update(source_attrs)
+    return result
 
 
 def reproject_gdf(gdf: gpd.GeoDataFrame, target_crs: str) -> gpd.GeoDataFrame:
@@ -235,6 +400,7 @@ def polygonize_lines_gdf(
     gdf: gpd.GeoDataFrame,
     clip_geom: gpd.GeoDataFrame = None,
     node_lines: bool = True,
+    show_progress: bool = False,
 ) -> gpd.GeoDataFrame:
     """Polygonizes lines in a GeoDataFrame.
 
@@ -274,81 +440,83 @@ def polygonize_lines_gdf(
                     for interior in poly.interiors:
                         lines.append(interior)
 
-    # Noding lines via union_all. This is expensive, so internal callers that
-    # already pass split/noded linework can skip it.
-    from shapely import set_precision
-    lines = [set_precision(line, 1e-4) for line in lines]
+    progress = tqdm(
+        total=3,
+        desc="Polygonizing road network",
+        unit="operation",
+        disable=not show_progress,
+        position=1,
+        leave=False,
+        dynamic_ncols=True,
+    )
+
+    lines = shapely.set_precision(np.asarray(lines, dtype=object), 1e-4)
     if node_lines:
-        polygonize_input = gpd.GeoSeries(lines, crs=gdf.crs).union_all()
+        polygonize_input = shapely.get_parts(shapely.union_all(lines))
     else:
         polygonize_input = lines
+    progress.update(1)
 
-    # Try polygonize on the noded geometry
-    polygons = list(polygonize(polygonize_input))
+    polygons = shapely.get_parts(shapely.polygonize(polygonize_input))
     logger.info("Number of polygons found: %s", len(polygons))
+    progress.update(1)
 
-    if not polygons:
-        # Use polygonize_full to get polygons even when dangles/cuts exist
+    if len(polygons) == 0:
         try:
-            polys, dangles, cuts, invalids = polygonize_full(polygonize_input)
-            polygons = list(polys)
+            polys, _, _, _ = shapely.polygonize_full(polygonize_input)
+            polygons = shapely.get_parts(polys)
         except Exception:
-            polygons = []
+            polygons = np.empty(0, dtype=object)
 
-    if not polygons and not node_lines:
+    if len(polygons) == 0 and not node_lines:
         logger.info("Fast polygonize returned no polygons; retrying with noded linework")
-        polygonize_input = gpd.GeoSeries(lines, crs=gdf.crs).union_all()
-        polygons = list(polygonize(polygonize_input))
+        polygonize_input = shapely.get_parts(shapely.union_all(lines))
+        polygons = shapely.get_parts(shapely.polygonize(polygonize_input))
         logger.info("Number of polygons found after renoding: %s", len(polygons))
-        if not polygons:
+        if len(polygons) == 0:
             try:
-                polys, dangles, cuts, invalids = polygonize_full(polygonize_input)
-                polygons = list(polys)
+                polys, _, _, _ = shapely.polygonize_full(polygonize_input)
+                polygons = shapely.get_parts(polys)
             except Exception:
-                polygons = []
+                polygons = np.empty(0, dtype=object)
 
     # If we added the bounding box exterior, we must remove the "outside" polygon
     # that is formed by the bounding box and the lines, as well as ensure we only
     # keep polygons within the bounding box area.
-    if polygons and clip_geom is not None and not clip_geom.empty:
+    if len(polygons) and clip_geom is not None and not clip_geom.empty:
         clip_geom_union = clip_geom.geometry.union_all()
 
         # Buffer slightly to account for boundary intersection differences since
         # geometries were constructed mathematically and may be imperfect.
         clip_geom_buffered = clip_geom_union.buffer(1e-5)
 
-        filtered_polygons = []
-        for poly in polygons:
-            # Check if the polygon is inside the clipping area
-            # We use an interior point to be robust against boundary precision issues
-            repr_pt = poly.representative_point()
-            if clip_geom_buffered.contains(repr_pt) or clip_geom_buffered.intersects(repr_pt):
-                # Ensure we don't accidentally keep the outer background polygon that
-                # effectively represents the whole bounding box minus the streets.
-                # A simple heuristic is that its exterior will exactly overlap or strongly
-                # correlate with the bounding box exterior.
+        representative_points = shapely.point_on_surface(polygons)
+        inside = shapely.intersects(clip_geom_buffered, representative_points)
+        polygon_boundaries = shapely.get_exterior_ring(polygons)
+        clip_boundary_buffer = shapely.buffer(
+            shapely.boundary(clip_geom_union),
+            1e-3,
+        )
+        overlap_lengths = shapely.length(
+            shapely.intersection(polygon_boundaries, clip_boundary_buffer)
+        )
+        boundary_lengths = shapely.length(polygon_boundaries)
+        overlap_ratios = np.divide(
+            overlap_lengths,
+            boundary_lengths,
+            out=np.zeros_like(overlap_lengths),
+            where=boundary_lengths > 0,
+        )
+        outer_shell = np.zeros(len(polygons), dtype=bool)
+        if len(polygons) > 1:
+            outer_shell = (
+                (overlap_ratios > 0.95)
+                & (shapely.area(polygons) >= clip_geom_union.area * 0.5)
+            )
+        polygons = polygons[inside & ~outer_shell]
 
-                # Check how much of the polygon's exterior lies on the bounding box exterior
-                poly_ext = poly.exterior
-                clip_ext = clip_geom_union.exterior if clip_geom_union.geom_type == 'Polygon' else clip_geom_union.boundary
-
-                overlap = poly_ext.intersection(clip_ext.buffer(1e-3))
-                overlap_ratio = overlap.length / poly_ext.length if poly_ext.length > 0 else 0
-
-                # If a significant portion of its perimeter is the bounding box, it's likely the outer shell.
-                # The outer shell is usually touching all 4 sides, whereas inner blocks touch 0, 1, or 2 sides typically.
-                # Alternatively, we can check if the polygon contains the union of all lines (as the outer shell does)
-                # But a cleaner way is just checking area relative to bounding box.
-
-                if len(polygons) > 1 and overlap_ratio > 0.95 and poly.area >= clip_geom_union.area * 0.5:
-                    # In some exact test scenarios, the bounding box *is* the only polygon generated.
-                    # We don't want to filter it out if it's the only one. However, if there are multiple,
-                    # the largest one (typically > 50% of the bounding box area) is the external empty space
-                    # bounded by the clipping geometry and the network.
-                    continue # This is the outer background polygon
-
-                filtered_polygons.append(poly)
-        polygons = filtered_polygons
+    progress.update(1)
+    progress.close()
 
     gdf_poly = gpd.GeoDataFrame(geometry=polygons)
     gdf_poly = gdf_poly.set_crs(gdf.crs)
@@ -498,30 +666,177 @@ def _endpoint_connection_candidate(
     return min(eligible, key=lambda candidate: candidate[:2]), rejected_count
 
 
-def _count_repairable_endpoint_gaps(lines, tolerance, max_angle) -> int:
+def _noded_endpoint_data(lines: np.ndarray):
+    """Return interleaved endpoint metadata for already-noded lines."""
+    starts = shapely.get_point(lines, 0)
+    ends = shapely.get_point(lines, -1)
+    inner_starts = shapely.get_point(lines, 1)
+    inner_ends = shapely.get_point(lines, -2)
+
+    endpoints = np.empty(len(lines) * 2, dtype=object)
+    endpoints[0::2] = starts
+    endpoints[1::2] = ends
+    inner_points = np.empty(len(lines) * 2, dtype=object)
+    inner_points[0::2] = inner_starts
+    inner_points[1::2] = inner_ends
+    line_indexes = np.repeat(np.arange(len(lines)), 2)
+    is_start = np.tile(np.array([True, False]), len(lines))
+
+    endpoint_coordinates = np.column_stack(
+        (shapely.get_x(endpoints), shapely.get_y(endpoints))
+    )
+    _, node_ids = np.unique(
+        endpoint_coordinates,
+        axis=0,
+        return_inverse=True,
+    )
+    node_line_pairs = np.unique(
+        np.column_stack((node_ids, line_indexes)),
+        axis=0,
+    )
+    node_degrees = np.bincount(
+        node_line_pairs[:, 0],
+        minlength=int(node_ids.max()) + 1,
+    )
+    return (
+        endpoints,
+        inner_points,
+        line_indexes,
+        is_start,
+        node_ids,
+        node_degrees,
+    )
+
+
+def _find_protomaps_endpoint_connections(
+    lines: np.ndarray,
+    tolerance: float,
+    max_angle: float,
+):
+    """Find nearest forward-facing line connections for all degree-one endpoints."""
+    empty = {
+        "endpoint_indexes": np.empty(0, dtype=int),
+        "line_indexes": np.empty(0, dtype=int),
+        "is_start": np.empty(0, dtype=bool),
+        "endpoints": np.empty(0, dtype=object),
+        "connections": np.empty(0, dtype=object),
+        "distances": np.empty(0, dtype=float),
+        "rejected_count": 0,
+    }
+    if len(lines) == 0 or tolerance <= 0:
+        return empty
+
+    (
+        endpoints,
+        inner_points,
+        line_indexes,
+        is_start,
+        node_ids,
+        node_degrees,
+    ) = _noded_endpoint_data(lines)
+    disconnected = np.flatnonzero(node_degrees[node_ids] <= 1)
+    if len(disconnected) == 0:
+        return empty
+
+    pairs = STRtree(lines).query(
+        endpoints[disconnected],
+        predicate="dwithin",
+        distance=tolerance,
+    )
+    if pairs.shape[1] == 0:
+        return empty
+
+    endpoint_indexes = disconnected[pairs[0]]
+    candidate_line_indexes = pairs[1]
+    not_self = candidate_line_indexes != line_indexes[endpoint_indexes]
+    endpoint_indexes = endpoint_indexes[not_self]
+    candidate_line_indexes = candidate_line_indexes[not_self]
+    if len(endpoint_indexes) == 0:
+        return empty
+
+    candidate_endpoints = endpoints[endpoint_indexes]
+    candidate_lines = lines[candidate_line_indexes]
+    distances = shapely.distance(candidate_endpoints, candidate_lines)
+    positive_distance = (
+        np.isfinite(distances)
+        & (distances > 0)
+        & (distances <= tolerance)
+    )
+    endpoint_indexes = endpoint_indexes[positive_distance]
+    candidate_line_indexes = candidate_line_indexes[positive_distance]
+    distances = distances[positive_distance]
+    if len(endpoint_indexes) == 0:
+        return empty
+
+    candidate_endpoints = endpoints[endpoint_indexes]
+    nearest_lines = shapely.shortest_line(
+        candidate_endpoints,
+        lines[candidate_line_indexes],
+    )
+    connections = shapely.get_point(nearest_lines, -1)
+
+    outward_x = (
+        shapely.get_x(candidate_endpoints)
+        - shapely.get_x(inner_points[endpoint_indexes])
+    )
+    outward_y = (
+        shapely.get_y(candidate_endpoints)
+        - shapely.get_y(inner_points[endpoint_indexes])
+    )
+    connector_x = shapely.get_x(connections) - shapely.get_x(candidate_endpoints)
+    connector_y = shapely.get_y(connections) - shapely.get_y(candidate_endpoints)
+    outward_norm = np.hypot(outward_x, outward_y)
+    connector_norm = np.hypot(connector_x, connector_y)
+    nonzero = (outward_norm > 0) & (connector_norm > 0)
+    cosine = np.full(len(endpoint_indexes), np.nan, dtype=float)
+    cosine[nonzero] = (
+        outward_x[nonzero] * connector_x[nonzero]
+        + outward_y[nonzero] * connector_y[nonzero]
+    ) / (outward_norm[nonzero] * connector_norm[nonzero])
+    angles = np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0)))
+    eligible = nonzero & (angles <= max_angle)
+    rejected_count = int(np.count_nonzero(nonzero & ~eligible))
+    if not np.any(eligible):
+        empty["rejected_count"] = rejected_count
+        return empty
+
+    endpoint_indexes = endpoint_indexes[eligible]
+    candidate_line_indexes = candidate_line_indexes[eligible]
+    connections = connections[eligible]
+    distances = distances[eligible]
+    order = np.lexsort(
+        (candidate_line_indexes, distances, endpoint_indexes)
+    )
+    ordered_endpoints = endpoint_indexes[order]
+    first = np.r_[True, ordered_endpoints[1:] != ordered_endpoints[:-1]]
+    selected = order[first]
+    selected_endpoint_indexes = endpoint_indexes[selected]
+    return {
+        "endpoint_indexes": selected_endpoint_indexes,
+        "line_indexes": line_indexes[selected_endpoint_indexes],
+        "is_start": is_start[selected_endpoint_indexes],
+        "endpoints": endpoints[selected_endpoint_indexes],
+        "connections": connections[selected],
+        "distances": distances[selected],
+        "rejected_count": rejected_count,
+    }
+
+
+def _count_repairable_endpoint_gaps(
+    lines,
+    tolerance,
+    max_angle,
+    show_progress: bool = False,
+) -> int:
     """Count forward-facing disconnected endpoints within the repair tolerance."""
-    if not lines:
-        return 0
-    tree = STRtree(lines)
-    count = 0
-    for line_index, line in enumerate(lines):
-        coords = list(line.coords)
-        for endpoint_position, inner_position in ((0, 1), (-1, -2)):
-            endpoint = Point(coords[endpoint_position])
-            if _endpoint_neighbor_indexes(endpoint, line_index, tree, lines):
-                continue
-            candidate, _ = _endpoint_connection_candidate(
-                endpoint,
-                coords[inner_position],
-                line_index,
-                tree,
-                lines,
-                tolerance,
-                max_angle,
-            )
-            if candidate is not None:
-                count += 1
-    return count
+    line_array = np.asarray(lines, dtype=object)
+    return len(
+        _find_protomaps_endpoint_connections(
+            line_array,
+            tolerance,
+            max_angle,
+        )["endpoint_indexes"]
+    )
 
 
 def _validate_protomaps_topology_options(tolerance, max_angle) -> Tuple[float, float]:
@@ -580,97 +895,104 @@ def normalize_protomaps_topology(
     started = time.perf_counter()
     if show_progress:
         print("   Noding Protomaps road topology...")
+    progress = tqdm(
+        total=5,
+        desc="Normalizing Protomaps topology",
+        unit="operation",
+        disable=not show_progress,
+        position=1,
+        leave=False,
+        dynamic_ncols=True,
+    )
     noded_gdf = split_lines_at_intersections(gdf)
-    lines = [
-        geom
-        for geom in noded_gdf.geometry
-        if geom is not None and not geom.is_empty and geom.geom_type == "LineString"
+    lines = np.asarray(noded_gdf.geometry.array, dtype=object)
+    lines = lines[
+        ~shapely.is_missing(lines)
+        & ~shapely.is_empty(lines)
+        & (shapely.get_type_id(lines) == 1)
     ]
-    if not lines or endpoint_snap_tolerance == 0:
+    progress.update(1)
+    if len(lines) == 0 or endpoint_snap_tolerance == 0:
         stats["duration_s"] = time.perf_counter() - started
         result = noded_gdf.copy()
         result.attrs.update(source_attrs)
         result.attrs["protomaps_topology"] = stats
+        progress.close()
         return result
 
     # First discard short one-ended tails created when independently quantized
     # MVT features overshoot an otherwise valid intersection.
-    tree = STRtree(lines)
-    remove_indexes = set()
-    short_line_indexes = [
-        index
-        for index, line in enumerate(lines)
-        if line.length <= endpoint_snap_tolerance
-    ]
-    short_iter = _maybe_tqdm(
-        short_line_indexes,
-        show_progress,
-        desc="Removing Protomaps overshoots",
-        unit="segment",
+    (
+        _,
+        _,
+        _,
+        _,
+        node_ids,
+        node_degrees,
+    ) = _noded_endpoint_data(lines)
+    connected = node_degrees[node_ids] > 1
+    remove_mask = (
+        (shapely.length(lines) <= endpoint_snap_tolerance)
+        & (connected[0::2] != connected[1::2])
     )
-    for line_index in short_iter:
-        line = lines[line_index]
-        start = Point(line.coords[0])
-        end = Point(line.coords[-1])
-        start_connected = bool(
-            _endpoint_neighbor_indexes(start, line_index, tree, lines)
-        )
-        end_connected = bool(
-            _endpoint_neighbor_indexes(end, line_index, tree, lines)
-        )
-        if start_connected != end_connected:
-            remove_indexes.add(line_index)
+    stats["overshoots_removed"] = int(np.count_nonzero(remove_mask))
+    lines = lines[~remove_mask]
+    progress.update(1)
 
-    if remove_indexes:
-        lines = [
-            line for index, line in enumerate(lines) if index not in remove_indexes
-        ]
-    stats["overshoots_removed"] = len(remove_indexes)
-
-    tree = STRtree(lines)
-    repaired_lines = []
-    line_iter = _maybe_tqdm(
-        range(len(lines)),
-        show_progress,
-        desc="Repairing Protomaps endpoint gaps",
-        unit="line",
+    connection_data = _find_protomaps_endpoint_connections(
+        lines,
+        endpoint_snap_tolerance,
+        endpoint_snap_max_angle,
     )
-    for line_index in line_iter:
-        line = lines[line_index]
-        coords = list(line.coords)
-        endpoint_specs = ((0, 1), (-1, -2))
-        for endpoint_position, inner_position in endpoint_specs:
-            endpoint = Point(coords[endpoint_position])
-            if _endpoint_neighbor_indexes(endpoint, line_index, tree, lines):
-                continue
-
-            candidate, rejected_count = _endpoint_connection_candidate(
-                endpoint,
-                coords[inner_position],
-                line_index,
-                tree,
-                lines,
-                endpoint_snap_tolerance,
-                endpoint_snap_max_angle,
-            )
-            stats["rejected_candidates"] += rejected_count
-            if candidate is None:
-                continue
-
-            distance, _, connection = candidate
-            connection_coord = tuple(connection.coords[0])
-            if endpoint_position == 0:
-                coords.insert(0, connection_coord)
-            else:
-                coords.append(connection_coord)
-            stats["undershoots_repaired"] += 1
-            stats["max_gap_m"] = max(stats["max_gap_m"], float(distance))
-
-        repaired_lines.append(LineString(coords))
+    stats["undershoots_repaired"] = len(connection_data["endpoint_indexes"])
+    stats["rejected_candidates"] = connection_data["rejected_count"]
+    if len(connection_data["distances"]):
+        stats["max_gap_m"] = float(np.max(connection_data["distances"]))
+    progress.update(1)
 
     if stats["undershoots_repaired"] or stats["overshoots_removed"]:
-        merged = shapely.union_all(repaired_lines, grid_size=1e-4)
-        repaired_lines = _line_parts(merged)
+        if stats["undershoots_repaired"]:
+            additions: dict[int, dict[bool, tuple[float, float]]] = {}
+            addition_iter = _maybe_tqdm(
+                zip(
+                    connection_data["line_indexes"],
+                    connection_data["is_start"],
+                    connection_data["connections"],
+                ),
+                show_progress,
+                total=stats["undershoots_repaired"],
+                desc="Applying Protomaps endpoint repairs",
+                unit="endpoint",
+            )
+            for line_index, is_start, connection in addition_iter:
+                additions.setdefault(int(line_index), {})[bool(is_start)] = (
+                    float(connection.x),
+                    float(connection.y),
+                )
+
+            merge_input = lines.copy()
+            repair_iter = _maybe_tqdm(
+                additions.items(),
+                show_progress,
+                total=len(additions),
+                desc="Rebuilding repaired Protomaps lines",
+                unit="line",
+            )
+            for line_index, endpoint_additions in repair_iter:
+                coordinates = list(lines[line_index].coords)
+                if True in endpoint_additions:
+                    coordinates.insert(0, endpoint_additions[True])
+                if False in endpoint_additions:
+                    coordinates.append(endpoint_additions[False])
+                merge_input[line_index] = LineString(coordinates)
+        else:
+            merge_input = lines
+        repaired_lines = shapely.get_parts(
+            shapely.union_all(merge_input, grid_size=1e-4)
+        )
+    else:
+        repaired_lines = lines
+    progress.update(1)
 
     if show_progress:
         stats["remaining_eligible_endpoints"] = _count_repairable_endpoint_gaps(
@@ -678,6 +1000,8 @@ def normalize_protomaps_topology(
             endpoint_snap_tolerance,
             endpoint_snap_max_angle,
         )
+    progress.update(1)
+    progress.close()
 
     stats["duration_s"] = time.perf_counter() - started
     result = gpd.GeoDataFrame(geometry=repaired_lines, crs=noded_gdf.crs)
@@ -734,6 +1058,7 @@ def adjust_buffer_for_buildings(
     buildings_gdf: gpd.GeoDataFrame,
     default_buffer: float,
     min_d_to_building: float,
+    show_progress: bool = False,
 ) -> gpd.GeoDataFrame:
     """Adjusts the buffer distance for lines based on proximity to buildings.
 
@@ -752,6 +1077,11 @@ def adjust_buffer_for_buildings(
     """
     from .parameters import minimal_buffer
 
+    if lines_gdf.empty:
+        lines_gdf = lines_gdf.copy()
+        lines_gdf["buffer_dist"] = pd.Series(dtype=float)
+        return lines_gdf
+
     if buildings_gdf.empty:
         lines_gdf = lines_gdf.copy()
         lines_gdf["buffer_dist"] = default_buffer
@@ -759,54 +1089,59 @@ def adjust_buffer_for_buildings(
 
     lines_gdf = lines_gdf.copy()
 
-    # Create a spatial index for buildings for faster queries
-    buildings_sindex = buildings_gdf.sindex
+    line_geometries = np.asarray(lines_gdf.geometry.array, dtype=object)
+    building_geometries = np.asarray(buildings_gdf.geometry.array, dtype=object)
+    valid_buildings = (
+        ~shapely.is_missing(building_geometries)
+        & ~shapely.is_empty(building_geometries)
+    )
+    building_geometries = building_geometries[valid_buildings]
+    if len(building_geometries) == 0:
+        lines_gdf["buffer_dist"] = default_buffer
+        return lines_gdf
 
-    # For each line, find the nearest building and calculate the distance
-    def get_adjusted_buffer(row):
-        line = row.geometry
+    progress = tqdm(
+        total=3,
+        desc="Sidewalks: checking nearby buildings",
+        unit="operation",
+        disable=not show_progress,
+        position=1,
+        leave=False,
+        dynamic_ncols=True,
+    )
+    if "width" in lines_gdf.columns:
+        road_widths = pd.to_numeric(
+            lines_gdf["width"],
+            errors="coerce",
+        ).to_numpy(dtype=float)
+        road_widths[~np.isfinite(road_widths) | (road_widths <= 0)] = 6.0
+    else:
+        road_widths = np.full(len(lines_gdf), 6.0, dtype=float)
+    potential_reach = road_widths / 2.0 + default_buffer
+    pairs, pair_distances = STRtree(building_geometries).query_nearest(
+        line_geometries,
+        max_distance=float(np.max(potential_reach)),
+        return_distance=True,
+        all_matches=False,
+    )
+    progress.update(1)
 
-        # Get road width if available, otherwise use sensible default
-        road_width = row.get("width", 6.0)
-        if pd.isna(road_width) or road_width <= 0:
-            road_width = 6.0
+    minimum_distances = np.full(len(line_geometries), np.inf, dtype=float)
+    if pairs.shape[1]:
+        minimum_distances[pairs[0]] = pair_distances
+    progress.update(1)
 
-        # Find potential building matches using spatial index with expanded bounds
-        # Expand line bounds by default buffer distance to catch nearby buildings
-        line_bounds = line.bounds
-        expanded_bounds = (
-            line_bounds[0] - default_buffer,
-            line_bounds[1] - default_buffer,
-            line_bounds[2] + default_buffer,
-            line_bounds[3] + default_buffer,
-        )
-        possible_matches_index = list(buildings_sindex.intersection(expanded_bounds))
-
-        if not possible_matches_index:
-            return default_buffer
-
-        possible_matches = buildings_gdf.iloc[possible_matches_index]
-
-        if possible_matches.empty:
-            return default_buffer
-
-        # Calculate distance to nearest building
-        min_distance = possible_matches.distance(line).min()
-
-        # If a sidewalk would overlap a building, reduce width
-        # Sidewalk width = (road_width / 2) + buffer
-        potential_sidewalk_reach = (road_width / 2) + default_buffer
-
-        if min_distance < potential_sidewalk_reach:
-            # Adjust buffer to maintain minimum distance from building
-            adjusted_buffer = max(
-                min_distance - (road_width / 2) - min_d_to_building, minimal_buffer
-            )
-            return max(adjusted_buffer, minimal_buffer)
-
-        return default_buffer
-
-    lines_gdf["buffer_dist"] = lines_gdf.apply(get_adjusted_buffer, axis=1)
+    adjusted = np.full(len(lines_gdf), default_buffer, dtype=float)
+    overlaps = minimum_distances < potential_reach
+    adjusted[overlaps] = np.maximum(
+        minimum_distances[overlaps]
+        - road_widths[overlaps] / 2.0
+        - min_d_to_building,
+        minimal_buffer,
+    )
+    lines_gdf["buffer_dist"] = adjusted
+    progress.update(1)
+    progress.close()
 
     return lines_gdf
 
@@ -918,7 +1253,9 @@ def calculate_tangent_direction(
 
 
 def remove_lines_from_no_block_gdf(
-    gdf: gpd.GeoDataFrame, iterations: int = 1
+    gdf: gpd.GeoDataFrame,
+    iterations: int = 1,
+    show_progress: bool = False,
 ) -> gpd.GeoDataFrame:
     """Removes lines that do not form a block (dead-ends).
 
@@ -934,89 +1271,71 @@ def remove_lines_from_no_block_gdf(
         A new GeoDataFrame with dead-end lines removed.
     """
 
-    # Try to use OSMnx conversion; if it succeeds, convert to edges GeoDataFrame
-    # and then run the exact same iterative dead-end removal on that edges gdf
-    # so both code paths behave identically. If anything fails, fall back to
-    # manual handling below.
-    def _iterative_prune_edges_gdf(edges_gdf, iterations):
-        """Prune edges in an edges GeoDataFrame by removing edges that touch
-        degree-1 nodes iteratively for `iterations` passes.
-        """
-        edges = []
-        for line in edges_gdf.geometry:
-            if line is None:
-                continue
-            try:
-                u = tuple(line.coords[0])
-                v = tuple(line.coords[-1])
-            except Exception:
-                continue
-            edges.append((u, v, line))
+    progress = tqdm(
+        total=3,
+        desc="Dead ends: indexing sidewalk edges",
+        unit="operation",
+        disable=not show_progress,
+        position=1,
+        leave=False,
+        dynamic_ncols=True,
+    )
+    geometries = np.asarray(gdf.geometry.array, dtype=object)
+    geometry_types = shapely.get_type_id(geometries)
+    valid = (
+        ~shapely.is_missing(geometries)
+        & ~shapely.is_empty(geometries)
+        & np.isin(geometry_types, [0, 1, 2])
+    )
+    geometries = geometries[valid]
+    geometry_types = geometry_types[valid]
+    progress.update(1)
+    if len(geometries) == 0:
+        progress.close()
+        return gpd.GeoDataFrame(geometry=[], crs=gdf.crs)
 
-        remaining_edges = edges
-        for _ in range(max(0, int(iterations))):
-            deg = {}
-            for u, v, _ in remaining_edges:
-                deg[u] = deg.get(u, 0) + 1
-                deg[v] = deg.get(v, 0) + 1
+    starts = np.empty(len(geometries), dtype=object)
+    ends = np.empty(len(geometries), dtype=object)
+    point_mask = geometry_types == 0
+    starts[point_mask] = geometries[point_mask]
+    ends[point_mask] = geometries[point_mask]
+    linear_mask = ~point_mask
+    starts[linear_mask] = shapely.get_point(geometries[linear_mask], 0)
+    ends[linear_mask] = shapely.get_point(geometries[linear_mask], -1)
+    endpoint_coordinates = np.empty((len(geometries), 2, 2), dtype=float)
+    endpoint_coordinates[:, 0, 0] = shapely.get_x(starts)
+    endpoint_coordinates[:, 0, 1] = shapely.get_y(starts)
+    endpoint_coordinates[:, 1, 0] = shapely.get_x(ends)
+    endpoint_coordinates[:, 1, 1] = shapely.get_y(ends)
+    progress.update(2)
+    progress.close()
 
-            new_remaining = []
-            removed_any = False
-            for u, v, line in remaining_edges:
-                if deg.get(u, 0) == 1 or deg.get(v, 0) == 1:
-                    removed_any = True
-                    continue
-                new_remaining.append((u, v, line))
+    active = np.arange(len(geometries))
+    iteration_count = max(0, int(iterations))
+    iteration_iter = _maybe_tqdm(
+        range(iteration_count),
+        show_progress,
+        total=iteration_count,
+        desc="Dead ends: pruning passes",
+        unit="pass",
+    )
+    for _ in iteration_iter:
+        active_endpoints = endpoint_coordinates[active].reshape(-1, 2)
+        _, node_ids, node_degrees = np.unique(
+            active_endpoints,
+            axis=0,
+            return_inverse=True,
+            return_counts=True,
+        )
+        keep = (
+            (node_degrees[node_ids[0::2]] > 1)
+            & (node_degrees[node_ids[1::2]] > 1)
+        )
+        if np.all(keep):
+            break
+        active = active[keep]
 
-            remaining_edges = new_remaining
-            if not removed_any:
-                break
-
-        remaining = [line for _, _, line in remaining_edges]
-        out_gdf = gpd.GeoDataFrame(geometry=remaining)
-        try:
-            out_gdf = out_gdf.set_crs(edges_gdf.crs)
-        except Exception:
-            out_gdf.crs = edges_gdf.crs
-        return out_gdf
-
-    try:
-        # create a minimal nodes gdf for the conversion (empty is acceptable in
-        # some OSMnx versions), then convert result to edges gdf
-        nodes_gdf = gpd.GeoDataFrame(geometry=[])
-        try:
-            G = ox.graph_from_gdfs(nodes_gdf, gdf, graph_attrs={"crs": gdf.crs})
-            edges_gdf = ox.graph_to_gdfs(G, nodes=False, edges=True)
-            # run the same iterative pruning on the edges gdf
-            return _iterative_prune_edges_gdf(edges_gdf, iterations)
-        except Exception:
-            # fall through to manual handling
-            pass
-    except Exception:
-        # fall through to manual handling
-        pass
-
-    # Manual fallback: build mapping of edges to endpoints and remove edges
-    # that touch a degree-1 node. Repeat for the requested number of iterations.
-    edges = []
-    for line in gdf.geometry:
-        if line is None:
-            continue
-        try:
-            u = tuple(line.coords[0])
-            v = tuple(line.coords[-1])
-        except Exception:
-            continue
-        edges.append((u, v, line))
-
-    # Use the same iterative prune routine as above on a synthetic edges_gdf
-    synthetic_edges_gdf = gpd.GeoDataFrame(geometry=[e[2] for e in edges])
-    try:
-        synthetic_edges_gdf = synthetic_edges_gdf.set_crs(gdf.crs)
-    except Exception:
-        synthetic_edges_gdf.crs = gdf.crs
-
-    return _iterative_prune_edges_gdf(synthetic_edges_gdf, iterations)
+    return gpd.GeoDataFrame(geometry=geometries[active], crs=gdf.crs)
 
 
 def _dissolve_and_buffer_protoblocks(
@@ -1041,6 +1360,7 @@ def filter_and_buffer_protoblocks_gdf(
     sidewalks_gdf: gpd.GeoDataFrame,
     cutoff_percent: int,
     ignore_existing: bool = False,
+    show_progress: bool = False,
 ) -> gpd.GeoDataFrame:
     """Filters and buffers the protoblocks based on sidewalk coverage.
 
@@ -1062,14 +1382,26 @@ def filter_and_buffer_protoblocks_gdf(
     if ignore_existing or sidewalks_gdf.empty:
         return _dissolve_and_buffer_protoblocks(protoblocks_gdf)
 
+    progress = tqdm(
+        total=4,
+        desc="Protoblocks: filtering sidewalk coverage",
+        unit="operation",
+        disable=not show_progress,
+        position=1,
+        leave=False,
+        dynamic_ncols=True,
+    )
+
     # Calculate sidewalk area and store it in a new column
     sidewalks_with_area_gdf = sidewalks_gdf.copy()
     sidewalks_with_area_gdf["sidewalk_area_val"] = sidewalks_with_area_gdf.geometry.area
+    progress.update(1)
 
     # Spatial join
     joined_gdf = gpd.sjoin(
         protoblocks_gdf, sidewalks_with_area_gdf, how="inner", predicate="intersects"
     )
+    progress.update(1)
 
     # Sum the areas of intersecting sidewalks for each protoblock
     sidewalk_area_per_protoblock = joined_gdf.groupby(
@@ -1089,9 +1421,13 @@ def filter_and_buffer_protoblocks_gdf(
         protoblocks_gdf["sidewalk_area"] / protoblocks_gdf["protoblock_area"]
     ) * 100
     filtered_protoblocks = protoblocks_gdf[protoblocks_gdf["ratio"] <= cutoff_percent]
+    progress.update(1)
 
     # Dissolve and buffer
-    return _dissolve_and_buffer_protoblocks(filtered_protoblocks)
+    result = _dissolve_and_buffer_protoblocks(filtered_protoblocks)
+    progress.update(1)
+    progress.close()
+    return result
 
 
 def calculate_crossing_direction(point: Point, lines_df: gpd.GeoDataFrame) -> Point:
@@ -1152,6 +1488,8 @@ class _CrossingsGenerator:
         self.ray_growth_factor_local = None
         self.sidewalks_prepared = None
         self.sidewalks_union = None
+        self.sidewalk_geometries = None
+        self.sidewalk_tree = None
         self.kerb_fraction = None
         self.distance_tol = None
         self.base_curve_radius = None
@@ -1317,13 +1655,21 @@ class _CrossingsGenerator:
                 origin.y + direction[1] * length,
             )
             ray = LineString([origin, target])
-            if not self.sidewalks_prepared.intersects(ray):
+            candidate_indexes = self.sidewalk_tree.query(
+                ray,
+                predicate="intersects",
+            )
+            if len(candidate_indexes) == 0:
                 length *= self.ray_growth_factor_local
                 continue
-            hit = self.sidewalks_union.intersection(ray)
-            candidate = self._extract_hit(hit, origin)
-            if candidate is not None:
-                return candidate
+            candidates = []
+            for candidate_index in candidate_indexes:
+                hit = self.sidewalk_geometries[int(candidate_index)].intersection(ray)
+                candidate = self._extract_hit(hit, origin)
+                if candidate is not None:
+                    candidates.append(candidate)
+            if candidates:
+                return min(candidates, key=origin.distance)
             length *= self.ray_growth_factor_local
         return None
 
@@ -1375,6 +1721,492 @@ class _CrossingsGenerator:
         }
 
 
+def _nearest_ray_hits(
+    rays: np.ndarray,
+    origins: np.ndarray,
+    sidewalk_tree: STRtree,
+    sidewalk_geometries: np.ndarray,
+    tolerance: float = 1e-3,
+) -> np.ndarray:
+    """Return the nearest sidewalk intersection for every ray in one tree query."""
+    hits = np.full(len(rays), None, dtype=object)
+    if len(rays) == 0 or len(sidewalk_geometries) == 0:
+        return hits
+
+    pairs = sidewalk_tree.query(rays, predicate="intersects")
+    if pairs.shape[1] == 0:
+        return hits
+
+    ray_indexes = pairs[0]
+    sidewalk_indexes = pairs[1]
+    intersections = shapely.intersection(
+        rays[ray_indexes],
+        sidewalk_geometries[sidewalk_indexes],
+    )
+    nearest_lines = shapely.shortest_line(origins[ray_indexes], intersections)
+    nearest_points = shapely.get_point(nearest_lines, -1)
+    distances = shapely.distance(origins[ray_indexes], nearest_points)
+
+    valid = (
+        ~shapely.is_empty(nearest_points)
+        & np.isfinite(distances)
+        & (distances > tolerance)
+    )
+    if np.any(valid):
+        valid_ray_indexes = ray_indexes[valid]
+        valid_distances = distances[valid]
+        valid_points = nearest_points[valid]
+        order = np.lexsort((valid_distances, valid_ray_indexes))
+        ordered_ray_indexes = valid_ray_indexes[order]
+        first_for_ray = np.r_[
+            True,
+            ordered_ray_indexes[1:] != ordered_ray_indexes[:-1],
+        ]
+        selected = order[first_for_ray]
+        hits[valid_ray_indexes[selected]] = valid_points[selected]
+
+    # A ray can start on one sidewalk and hit another farther away. The vectorized
+    # shortest-line result is then the origin itself; resolve only these rare cases
+    # with the complete scalar extractor instead of penalizing every ray.
+    origin_pairs = np.flatnonzero(~valid & (distances <= tolerance))
+    if len(origin_pairs):
+        grouped: dict[int, list] = {}
+        for pair_position in origin_pairs:
+            grouped.setdefault(int(ray_indexes[pair_position]), []).append(
+                intersections[pair_position]
+            )
+        extractor = _CrossingsGenerator()
+        for ray_index, geometries in grouped.items():
+            if hits[ray_index] is not None:
+                continue
+            candidates = [
+                candidate
+                for geometry in geometries
+                if (
+                    candidate := extractor._extract_hit(
+                        geometry,
+                        origins[ray_index],
+                        tolerance,
+                    )
+                )
+                is not None
+            ]
+            if candidates:
+                hits[ray_index] = min(
+                    candidates,
+                    key=origins[ray_index].distance,
+                )
+
+    return hits
+
+
+def _nearest_ray_hits_with_growth(
+    rays: np.ndarray,
+    origins: np.ndarray,
+    sidewalk_tree: STRtree,
+    sidewalk_geometries: np.ndarray,
+    growth_factor: float,
+    max_iterations: int,
+) -> np.ndarray:
+    """Cast short rays first and grow only those that miss a sidewalk."""
+    hits = np.full(len(rays), None, dtype=object)
+    active_indexes = np.arange(len(rays))
+    active_rays = rays
+
+    for _ in range(max(1, int(max_iterations))):
+        active_hits = _nearest_ray_hits(
+            active_rays,
+            origins[active_indexes],
+            sidewalk_tree,
+            sidewalk_geometries,
+        )
+        found = ~pd.isna(active_hits)
+        if np.any(found):
+            hits[active_indexes[found]] = active_hits[found]
+
+        missing = ~found
+        if not np.any(missing):
+            break
+        active_indexes = active_indexes[missing]
+        active_rays = active_rays[missing]
+
+        ray_ends = shapely.get_point(active_rays, -1)
+        active_origins = origins[active_indexes]
+        origin_x = shapely.get_x(active_origins)
+        origin_y = shapely.get_y(active_origins)
+        end_x = shapely.get_x(ray_ends)
+        end_y = shapely.get_y(ray_ends)
+        grown_coordinates = np.stack(
+            (
+                np.column_stack((origin_x, origin_y)),
+                np.column_stack(
+                    (
+                        origin_x + (end_x - origin_x) * growth_factor,
+                        origin_y + (end_y - origin_y) * growth_factor,
+                    )
+                ),
+            ),
+            axis=1,
+        )
+        active_rays = shapely.linestrings(grown_coordinates)
+
+    return hits
+
+
+def _nearest_ray_hits_parallel(
+    rays: np.ndarray,
+    origins: np.ndarray,
+    sidewalk_tree: STRtree,
+    sidewalk_geometries: np.ndarray,
+    growth_factor: float,
+    max_iterations: int,
+    min_parallel_size: int = 4_000,
+) -> np.ndarray:
+    """Parallelize large read-only STRtree ray batches across GEOS threads."""
+    worker_count = min(8, os.cpu_count() or 1)
+    if worker_count <= 1 or len(rays) < min_parallel_size:
+        return _nearest_ray_hits_with_growth(
+            rays,
+            origins,
+            sidewalk_tree,
+            sidewalk_geometries,
+            growth_factor,
+            max_iterations,
+        )
+
+    chunks = [
+        indexes
+        for indexes in np.array_split(np.arange(len(rays)), worker_count)
+        if len(indexes)
+    ]
+    with ThreadPoolExecutor(max_workers=len(chunks)) as executor:
+        futures = [
+            executor.submit(
+                _nearest_ray_hits_with_growth,
+                rays[indexes],
+                origins[indexes],
+                sidewalk_tree,
+                sidewalk_geometries,
+                growth_factor,
+                max_iterations,
+            )
+            for indexes in chunks
+        ]
+        return np.concatenate([future.result() for future in futures])
+
+
+def _crossing_rays(
+    lines: np.ndarray,
+    segment_indexes: np.ndarray,
+    line_lengths: np.ndarray,
+    inward_distances: np.ndarray,
+    from_start: np.ndarray,
+    ray_lengths: np.ndarray,
+):
+    """Build centers, perpendiculars, and paired rays for crossing candidates."""
+    selected_lines = lines[segment_indexes]
+    selected_lengths = line_lengths[segment_indexes]
+    along = np.where(
+        from_start,
+        inward_distances,
+        selected_lengths - inward_distances,
+    )
+    centers = shapely.line_interpolate_point(selected_lines, along)
+
+    spans = np.maximum(np.minimum(selected_lengths * 0.05, 1.0), 1e-3)
+    point_before = shapely.line_interpolate_point(
+        selected_lines,
+        np.maximum(along - spans, 0.0),
+    )
+    point_after = shapely.line_interpolate_point(
+        selected_lines,
+        np.minimum(along + spans, selected_lengths),
+    )
+    dx = shapely.get_x(point_after) - shapely.get_x(point_before)
+    dy = shapely.get_y(point_after) - shapely.get_y(point_before)
+    norms = np.hypot(dx, dy)
+    valid = np.isfinite(norms) & (norms > 0)
+    perpendicular_x = np.zeros(len(centers), dtype=float)
+    perpendicular_y = np.zeros(len(centers), dtype=float)
+    perpendicular_x[valid] = -dy[valid] / norms[valid]
+    perpendicular_y[valid] = dx[valid] / norms[valid]
+
+    center_x = shapely.get_x(centers)
+    center_y = shapely.get_y(centers)
+    ray_coordinates = np.empty((len(centers) * 2, 2, 2), dtype=float)
+    ray_coordinates[0::2, 0, :] = np.column_stack((center_x, center_y))
+    ray_coordinates[1::2, 0, :] = np.column_stack((center_x, center_y))
+    ray_coordinates[0::2, 1, 0] = center_x + perpendicular_x * ray_lengths
+    ray_coordinates[0::2, 1, 1] = center_y + perpendicular_y * ray_lengths
+    ray_coordinates[1::2, 1, 0] = center_x - perpendicular_x * ray_lengths
+    ray_coordinates[1::2, 1, 1] = center_y - perpendicular_y * ray_lengths
+    rays = shapely.linestrings(ray_coordinates)
+    origins = np.repeat(centers, 2)
+    return centers, perpendicular_x, perpendicular_y, rays, origins, valid
+
+
+def _draw_crossings_noded(
+    streets_gdf: gpd.GeoDataFrame,
+    generator: _CrossingsGenerator,
+    *,
+    inward_offset: float,
+    extra_length: float,
+    increment_inward: float,
+    max_crossings_iterations: int,
+    abs_max_crossing_len: float,
+    perc_tol_crossings: float,
+    show_progress: bool,
+) -> gpd.GeoDataFrame:
+    """Generate crossings from an already-noded network using batched ufuncs."""
+    geometry_series = streets_gdf.geometry.explode(
+        index_parts=False,
+        ignore_index=False,
+    )
+    original_indexes = geometry_series.index.to_numpy()
+    lines = np.asarray(geometry_series.array, dtype=object)
+    valid_lines = (
+        ~shapely.is_missing(lines)
+        & ~shapely.is_empty(lines)
+        & (shapely.get_type_id(lines) == 1)
+        & (shapely.length(lines) > generator.distance_tol)
+    )
+    lines = lines[valid_lines]
+    original_indexes = original_indexes[valid_lines]
+    if len(lines) == 0:
+        return generator._empty_result()
+
+    if "width" in streets_gdf.columns:
+        source_widths = pd.to_numeric(
+            streets_gdf["width"],
+            errors="coerce",
+        ).reindex(geometry_series.index).to_numpy(dtype=float)
+        widths = source_widths[valid_lines]
+        widths[~np.isfinite(widths) | (widths <= 0)] = generator.fallback_width
+    else:
+        widths = np.full(len(lines), generator.fallback_width, dtype=float)
+
+    progress = tqdm(
+        total=max(1, int(max_crossings_iterations)) + 3,
+        desc="Crossings: batched noded network",
+        unit="batch",
+        disable=not show_progress,
+        position=1,
+        leave=False,
+        dynamic_ncols=True,
+    )
+
+    line_lengths = shapely.length(lines)
+    starts = shapely.get_point(lines, 0)
+    ends = shapely.get_point(lines, -1)
+    endpoint_coordinates = np.column_stack(
+        (
+            np.ravel(
+                np.column_stack((shapely.get_x(starts), shapely.get_x(ends)))
+            ),
+            np.ravel(
+                np.column_stack((shapely.get_y(starts), shapely.get_y(ends)))
+            ),
+        )
+    )
+    rounded_endpoints = np.round(endpoint_coordinates, generator.tolerance)
+    _, node_ids = np.unique(
+        rounded_endpoints,
+        axis=0,
+        return_inverse=True,
+    )
+    endpoint_segment_indexes = np.repeat(np.arange(len(lines)), 2)
+    endpoint_from_start = np.tile(np.array([True, False]), len(lines))
+    endpoint_widths = widths[endpoint_segment_indexes]
+    node_segment_pairs = np.unique(
+        np.column_stack((node_ids, endpoint_segment_indexes)),
+        axis=0,
+    )
+    node_degrees = np.bincount(
+        node_segment_pairs[:, 0],
+        minlength=int(node_ids.max()) + 1,
+    )
+    node_major_widths = np.full(len(node_degrees), -np.inf, dtype=float)
+    np.maximum.at(node_major_widths, node_ids, endpoint_widths)
+    progress.update(1)
+
+    candidate_mask = node_degrees[node_ids] > 2
+    segment_indexes = endpoint_segment_indexes[candidate_mask]
+    from_start = endpoint_from_start[candidate_mask]
+    candidate_node_ids = node_ids[candidate_mask]
+    candidate_degrees = node_degrees[candidate_node_ids]
+    candidate_widths = widths[segment_indexes]
+    candidate_lengths = line_lengths[segment_indexes]
+    base_lengths = candidate_widths + extra_length
+    max_inward = np.minimum(candidate_lengths * 0.49, candidate_lengths * 0.99)
+    inward_distances = np.minimum(
+        0.5 * node_major_widths[candidate_node_ids]
+        + generator.base_curve_radius
+        + inward_offset,
+        max_inward,
+    )
+    valid_candidates = (
+        (base_lengths > 0)
+        & (candidate_lengths > generator.distance_tol)
+        & (inward_distances > generator.distance_tol)
+    )
+    segment_indexes = segment_indexes[valid_candidates]
+    from_start = from_start[valid_candidates]
+    candidate_degrees = candidate_degrees[valid_candidates]
+    candidate_widths = candidate_widths[valid_candidates]
+    base_lengths = base_lengths[valid_candidates]
+    max_inward = max_inward[valid_candidates]
+    inward_distances = inward_distances[valid_candidates]
+    output_segment_ids = original_indexes[segment_indexes]
+    progress.update(1)
+
+    if len(segment_indexes) == 0:
+        progress.close()
+        return generator._empty_result()
+
+    ray_lengths = np.maximum(base_lengths, 0.5)
+    max_allowed = base_lengths * (1 + perc_tol_crossings / 100.0)
+    point_a = np.full(len(segment_indexes), None, dtype=object)
+    point_e = np.full(len(segment_indexes), None, dtype=object)
+    accepted = np.zeros(len(segment_indexes), dtype=bool)
+    fallback = np.zeros(len(segment_indexes), dtype=bool)
+    last_centers = np.full(len(segment_indexes), None, dtype=object)
+    last_perpendicular_x = np.zeros(len(segment_indexes), dtype=float)
+    last_perpendicular_y = np.zeros(len(segment_indexes), dtype=float)
+    active = np.ones(len(segment_indexes), dtype=bool)
+
+    for _ in range(max(1, int(max_crossings_iterations))):
+        active_indexes = np.flatnonzero(active)
+        if len(active_indexes) == 0:
+            progress.update(1)
+            continue
+
+        centers, perp_x, perp_y, rays, origins, tangent_valid = _crossing_rays(
+            lines,
+            segment_indexes[active_indexes],
+            line_lengths,
+            inward_distances[active_indexes],
+            from_start[active_indexes],
+            ray_lengths[active_indexes],
+        )
+        last_centers[active_indexes] = centers
+        last_perpendicular_x[active_indexes] = perp_x
+        last_perpendicular_y[active_indexes] = perp_y
+        hits = _nearest_ray_hits_parallel(
+            rays,
+            origins,
+            generator.sidewalk_tree,
+            generator.sidewalk_geometries,
+            generator.ray_growth_factor_local,
+            generator.max_ray_iterations_local,
+        )
+        hits_a = hits[0::2]
+        hits_e = hits[1::2]
+        has_hits = (
+            tangent_valid
+            & ~pd.isna(hits_a)
+            & ~pd.isna(hits_e)
+        )
+        hit_lengths = np.full(len(active_indexes), np.inf, dtype=float)
+        if np.any(has_hits):
+            hit_lengths[has_hits] = shapely.distance(
+                hits_a[has_hits],
+                hits_e[has_hits],
+            )
+        successful = (
+            has_hits
+            & (hit_lengths > 0)
+            & (hit_lengths <= abs_max_crossing_len)
+            & (hit_lengths <= max_allowed[active_indexes])
+        )
+        successful_indexes = active_indexes[successful]
+        point_a[successful_indexes] = hits_a[successful]
+        point_e[successful_indexes] = hits_e[successful]
+        accepted[successful_indexes] = True
+        active[successful_indexes] = False
+
+        retry_indexes = active_indexes[~successful]
+        can_move = (
+            inward_distances[retry_indexes]
+            < max_inward[retry_indexes] - generator.distance_tol
+        )
+        if np.any(can_move):
+            moving_indexes = retry_indexes[can_move]
+            inward_distances[moving_indexes] = np.minimum(
+                inward_distances[moving_indexes] + increment_inward,
+                max_inward[moving_indexes],
+            )
+        exhausted_indexes = retry_indexes[~can_move]
+        active[exhausted_indexes] = False
+        fallback[exhausted_indexes] = base_lengths[exhausted_indexes] <= abs_max_crossing_len
+        progress.update(1)
+
+    remaining = np.flatnonzero(active)
+    if len(remaining):
+        fallback[remaining] = base_lengths[remaining] <= abs_max_crossing_len
+        active[remaining] = False
+
+    fallback_indexes = np.flatnonzero(fallback & ~accepted)
+    if len(fallback_indexes):
+        half = base_lengths[fallback_indexes] / 2.0
+        center_x = shapely.get_x(last_centers[fallback_indexes])
+        center_y = shapely.get_y(last_centers[fallback_indexes])
+        point_a[fallback_indexes] = shapely.points(
+            center_x + last_perpendicular_x[fallback_indexes] * half,
+            center_y + last_perpendicular_y[fallback_indexes] * half,
+        )
+        point_e[fallback_indexes] = shapely.points(
+            center_x - last_perpendicular_x[fallback_indexes] * half,
+            center_y - last_perpendicular_y[fallback_indexes] * half,
+        )
+
+    keep = accepted | fallback
+    if not np.any(keep):
+        progress.close()
+        return generator._empty_result()
+
+    point_a = point_a[keep]
+    point_e = point_e[keep]
+    kept_base_lengths = base_lengths[keep]
+    point_a_x = shapely.get_x(point_a)
+    point_a_y = shapely.get_y(point_a)
+    point_e_x = shapely.get_x(point_e)
+    point_e_y = shapely.get_y(point_e)
+    midpoint_x = (point_a_x + point_e_x) / 2.0
+    midpoint_y = (point_a_y + point_e_y) / 2.0
+    point_b_x = point_a_x + (midpoint_x - point_a_x) * generator.kerb_fraction
+    point_b_y = point_a_y + (midpoint_y - point_a_y) * generator.kerb_fraction
+    point_d_x = point_e_x + (midpoint_x - point_e_x) * generator.kerb_fraction
+    point_d_y = point_e_y + (midpoint_y - point_e_y) * generator.kerb_fraction
+    coordinates = np.stack(
+        (
+            np.column_stack((point_a_x, point_a_y)),
+            np.column_stack((point_b_x, point_b_y)),
+            np.column_stack((midpoint_x, midpoint_y)),
+            np.column_stack((point_d_x, point_d_y)),
+            np.column_stack((point_e_x, point_e_y)),
+        ),
+        axis=1,
+    )
+    crossing_geometries = shapely.linestrings(coordinates)
+    crossing_lengths = np.hypot(point_a_x - point_e_x, point_a_y - point_e_y)
+    result = gpd.GeoDataFrame(
+        {
+            "length_m": crossing_lengths,
+            "length_ok": crossing_lengths <= max_allowed[keep],
+            "above_tolerance": crossing_lengths > kept_base_lengths,
+            "segment_id": output_segment_ids[keep],
+            "node_degree": candidate_degrees[keep],
+            "center_offset_m": inward_distances[keep],
+            "used_fallback": fallback[keep] & ~accepted[keep],
+        },
+        geometry=crossing_geometries,
+        crs=generator.crs,
+    )
+    progress.update(1)
+    progress.close()
+    return result
+
+
 def draw_crossings_gdf(
     streets_gdf: gpd.GeoDataFrame,
     sidewalks_gdf: Optional[gpd.GeoDataFrame] = None,
@@ -1392,6 +2224,7 @@ def draw_crossings_gdf(
     max_ray_iterations: int = 5,
     node_precision: int = 6,
     show_progress: bool = False,
+    assume_noded: bool = False,
 ) -> gpd.GeoDataFrame:
     """Generate crossings following the documented Sidewalkreator procedure."""
 
@@ -1408,13 +2241,21 @@ def draw_crossings_gdf(
     if sidewalks_gdf is None or sidewalks_gdf.empty:
         return generator._empty_result()
 
-    sidewalks_union = sidewalks_gdf.geometry.union_all()
-    generator.sidewalks_union = sidewalks_union
-    if sidewalks_union.is_empty:
+    sidewalk_series = sidewalks_gdf.geometry.explode(
+        index_parts=False,
+        ignore_index=True,
+    )
+    sidewalk_geometries = np.asarray(sidewalk_series.array, dtype=object)
+    valid_sidewalks = (
+        ~shapely.is_missing(sidewalk_geometries)
+        & ~shapely.is_empty(sidewalk_geometries)
+        & np.isin(shapely.get_type_id(sidewalk_geometries), [1, 2])
+    )
+    sidewalk_geometries = sidewalk_geometries[valid_sidewalks]
+    if len(sidewalk_geometries) == 0:
         return generator._empty_result()
-
-    sidewalks_prepared = prep(sidewalks_union)
-    generator.sidewalks_prepared = sidewalks_prepared
+    generator.sidewalk_geometries = sidewalk_geometries
+    generator.sidewalk_tree = STRtree(sidewalk_geometries)
 
     # Keep protoblock argument for API completeness (not yet used for filtering).
     _ = protoblocks_gdf
@@ -1433,6 +2274,23 @@ def draw_crossings_gdf(
     generator.ray_growth_factor_local = ray_growth_factor_local
     generator.max_ray_iterations_local = max_ray_iterations_local
     generator.distance_tol = distance_tol
+
+    if assume_noded:
+        return _draw_crossings_noded(
+            streets_gdf,
+            generator,
+            inward_offset=inward_offset,
+            extra_length=extra_length,
+            increment_inward=increment_inward,
+            max_crossings_iterations=max_crossings_iterations,
+            abs_max_crossing_len=abs_max_crossing_len,
+            perc_tol_crossings=perc_tol_crossings,
+            show_progress=show_progress,
+        )
+
+    sidewalks_union = shapely.union_all(sidewalk_geometries)
+    generator.sidewalks_union = sidewalks_union
+    generator.sidewalks_prepared = prep(sidewalks_union)
 
 
 
@@ -1761,7 +2619,7 @@ def _create_voronoi_lines_gdf(points: List[Tuple[float, float]], crs) -> gpd.Geo
     return gpd.GeoDataFrame(geometry=lines, crs=crs)
 
 
-def _split_single_sidewalk(sidewalk, voronoi_lines_gdf: gpd.GeoDataFrame) -> List:
+def _split_single_sidewalk(sidewalk, voronoi_lines) -> List:
     if sidewalk is None or sidewalk.is_empty:
         return []
 
@@ -1779,7 +2637,7 @@ def _split_single_sidewalk(sidewalk, voronoi_lines_gdf: gpd.GeoDataFrame) -> Lis
         return []
 
     # Avoid potentially hanging union_all operation - split by individual lines instead
-    for voronoi_line in voronoi_lines_gdf.geometry:
+    for voronoi_line in voronoi_lines:
         if voronoi_line.is_empty or not voronoi_line.is_valid:
             continue
 
@@ -1808,7 +2666,9 @@ def _split_single_sidewalk(sidewalk, voronoi_lines_gdf: gpd.GeoDataFrame) -> Lis
 
 
 def split_sidewalks_by_voronoi(
-    sidewalks_gdf: gpd.GeoDataFrame, pois_gdf: gpd.GeoDataFrame
+    sidewalks_gdf: gpd.GeoDataFrame,
+    pois_gdf: gpd.GeoDataFrame,
+    show_progress: bool = False,
 ) -> gpd.GeoDataFrame:
     """Splits sidewalks by Voronoi polygons generated from POIs.
 
@@ -1834,11 +2694,91 @@ def split_sidewalks_by_voronoi(
     if voronoi_lines_gdf.empty:
         return sidewalks_gdf
 
-    # Split the sidewalks by the Voronoi lines
+    # Query all sidewalk/Voronoi intersections once, then split each sidewalk
+    # with only its local candidates. The former loop tested every Voronoi edge
+    # against every sidewalk.
+    splittable_geometries = np.asarray(
+        [
+            geometry.boundary
+            if geometry.geom_type in {"Polygon", "MultiPolygon"}
+            else geometry
+            for geometry in sidewalks_gdf.geometry
+        ],
+        dtype=object,
+    )
+    voronoi_geometries = np.asarray(
+        voronoi_lines_gdf.geometry.array,
+        dtype=object,
+    )
+    pairs = STRtree(voronoi_geometries).query(
+        splittable_geometries,
+        predicate="intersects",
+    )
+    unique_pairs = np.unique(pairs.T, axis=0)
+    sidewalk_matches = unique_pairs[:, 0]
+    voronoi_matches = unique_pairs[:, 1]
+    matched_sidewalks = np.unique(sidewalk_matches)
+    match_starts = np.searchsorted(sidewalk_matches, matched_sidewalks, side="left")
+    match_ends = np.searchsorted(sidewalk_matches, matched_sidewalks, side="right")
+
+    source_geometries = np.asarray(sidewalks_gdf.geometry.array, dtype=object)
+    linear_fast_path = (
+        len(source_geometries) > 0
+        and np.all(shapely.get_type_id(source_geometries) == 1)
+        and np.all(shapely.is_valid(source_geometries))
+    )
+
     new_sidewalks = []
-    for sidewalk in sidewalks_gdf.geometry:
-        segments = _split_single_sidewalk(sidewalk, voronoi_lines_gdf)
-        new_sidewalks.extend(segments)
+    if linear_fast_path:
+        cursor = 0
+        match_iter = _maybe_tqdm(
+            range(len(matched_sidewalks)),
+            show_progress,
+            total=len(matched_sidewalks),
+            desc="Splitting sidewalks by POI Voronoi edges",
+            unit="sidewalk",
+        )
+        for match_index in match_iter:
+            sidewalk_index = int(matched_sidewalks[match_index])
+            new_sidewalks.extend(source_geometries[cursor:sidewalk_index])
+            local_indexes = voronoi_matches[
+                match_starts[match_index] : match_ends[match_index]
+            ]
+            new_sidewalks.extend(
+                _split_single_sidewalk(
+                    source_geometries[sidewalk_index],
+                    voronoi_geometries[local_indexes],
+                )
+            )
+            cursor = sidewalk_index + 1
+        new_sidewalks.extend(source_geometries[cursor:])
+    else:
+        matches_by_sidewalk: dict[int, np.ndarray] = {
+            int(sidewalk_index): voronoi_matches[start:end]
+            for sidewalk_index, start, end in zip(
+                matched_sidewalks,
+                match_starts,
+                match_ends,
+            )
+        }
+        sidewalk_iter = _maybe_tqdm(
+            enumerate(source_geometries),
+            show_progress,
+            total=len(source_geometries),
+            desc="Splitting sidewalks by POI Voronoi edges",
+            unit="sidewalk",
+        )
+        for sidewalk_index, sidewalk in sidewalk_iter:
+            local_indexes = matches_by_sidewalk.get(
+                sidewalk_index,
+                np.empty(0, dtype=int),
+            )
+            new_sidewalks.extend(
+                _split_single_sidewalk(
+                    sidewalk,
+                    voronoi_geometries[local_indexes],
+                )
+            )
 
     if not new_sidewalks:
         # No valid splits produced, return original
@@ -1857,8 +2797,128 @@ def split_sidewalks_by_voronoi(
     return new_gdf
 
 
+def _split_geometries_by_points(
+    geometries_gdf: gpd.GeoDataFrame,
+    points,
+    *,
+    show_progress: bool,
+    description: str,
+    tolerance: float = 1e-7,
+) -> gpd.GeoDataFrame:
+    """Split linearized geometries using only spatially matching points."""
+    source_geometries = np.asarray(geometries_gdf.geometry.array, dtype=object)
+    source_types = shapely.get_type_id(source_geometries)
+    linear_fast_path = len(source_geometries) > 0 and np.all(
+        np.isin(source_types, [1, 2, 5])
+    )
+    if linear_fast_path:
+        normalize_progress = tqdm(
+            total=2,
+            desc=f"{description}: normalizing geometries",
+            unit="operation",
+            disable=not show_progress,
+            position=1,
+            leave=False,
+            dynamic_ncols=True,
+        )
+        line_array = shapely.get_parts(source_geometries)
+        normalize_progress.update(1)
+        line_array = line_array[
+            ~shapely.is_empty(line_array)
+            & np.isin(shapely.get_type_id(line_array), [1, 2])
+        ]
+        normalize_progress.update(1)
+        normalize_progress.close()
+    else:
+        normalized_lines = []
+        geometry_iter = _maybe_tqdm(
+            geometries_gdf.geometry,
+            show_progress,
+            total=len(geometries_gdf),
+            desc=f"{description}: normalizing geometries",
+            unit="geometry",
+        )
+        for geometry in geometry_iter:
+            if geometry is None or geometry.is_empty:
+                continue
+            if geometry.geom_type == "Polygon":
+                normalized_lines.extend(_line_parts(geometry.boundary))
+            elif geometry.geom_type == "MultiPolygon":
+                for polygon in geometry.geoms:
+                    normalized_lines.extend(_line_parts(polygon.boundary))
+            elif geometry.geom_type in {"LineString", "MultiLineString"}:
+                normalized_lines.extend(_line_parts(geometry))
+            elif geometry.geom_type in {"Point", "MultiPoint"}:
+                normalized_lines.append(LineString())
+        line_array = np.asarray(normalized_lines, dtype=object)
+
+    if len(line_array) == 0:
+        return gpd.GeoDataFrame(geometry=[], crs=geometries_gdf.crs)
+
+    point_array = np.asarray(points, dtype=object)
+    point_array = point_array[
+        ~shapely.is_missing(point_array)
+        & ~shapely.is_empty(point_array)
+        & (shapely.get_type_id(point_array) == 0)
+    ]
+    if len(point_array) == 0:
+        return gpd.GeoDataFrame(geometry=line_array, crs=geometries_gdf.crs)
+
+    point_tree = STRtree(point_array)
+    pairs = point_tree.query(
+        line_array,
+        predicate="dwithin",
+        distance=tolerance,
+    )
+    if pairs.shape[1] == 0:
+        return gpd.GeoDataFrame(geometry=line_array, crs=geometries_gdf.crs)
+
+    order = np.argsort(pairs[0], kind="stable")
+    line_matches = pairs[0][order]
+    point_matches = pairs[1][order]
+    matched_lines = np.unique(line_matches)
+    match_starts = np.searchsorted(line_matches, matched_lines, side="left")
+    match_ends = np.searchsorted(line_matches, matched_lines, side="right")
+
+    split_lines = []
+    line_iter = _maybe_tqdm(
+        range(len(matched_lines)),
+        show_progress,
+        total=len(matched_lines),
+        desc=description,
+        unit="sidewalk",
+    )
+    cursor = 0
+    for match_index in line_iter:
+        line_index = int(matched_lines[match_index])
+        split_lines.extend(line_array[cursor:line_index])
+        line = line_array[line_index]
+        cursor = line_index + 1
+        start = match_starts[match_index]
+        end = match_ends[match_index]
+
+        local_point_indexes = np.unique(point_matches[start:end])
+        try:
+            split_result = split(
+                line,
+                MultiPoint(point_array[local_point_indexes].tolist()),
+            )
+        except (GEOSException, ValueError, TypeError):
+            split_lines.append(line)
+            continue
+        split_lines.extend(
+            part for part in split_result.geoms if not part.is_empty
+        )
+
+    split_lines.extend(line_array[cursor:])
+
+    return gpd.GeoDataFrame(geometry=split_lines, crs=geometries_gdf.crs)
+
+
 def split_sidewalks_by_protoblock_corners(
-    sidewalks_gdf: gpd.GeoDataFrame, protoblocks_gdf: gpd.GeoDataFrame
+    sidewalks_gdf: gpd.GeoDataFrame,
+    protoblocks_gdf: gpd.GeoDataFrame,
+    show_progress: bool = False,
 ) -> gpd.GeoDataFrame:
     """Splits sidewalks by the corners of protoblocks.
 
@@ -1875,76 +2935,26 @@ def split_sidewalks_by_protoblock_corners(
     if protoblocks_gdf.empty:
         return sidewalks_gdf
 
-    # Get all protoblock corners using vectorized operations
-    # Explode MultiPolygons into Polygons, then get exterior coordinates
-    corners = (
-        protoblocks_gdf.geometry.explode(index_parts=True)
-        .exterior.get_coordinates()
-        .values
+    polygon_parts = protoblocks_gdf.geometry.explode(
+        index_parts=False,
+        ignore_index=True,
     )
-
-    # Create a single MultiPoint geometry of all the corners
-    splitter = MultiPoint(corners)
-
-    # Split the sidewalks
-    new_sidewalks = []
-    for sidewalk in sidewalks_gdf.geometry:
-        # Handle different geometry types - convert polygons to boundaries
-        if sidewalk.geom_type == "Polygon":
-            sidewalk = sidewalk.boundary
-        elif sidewalk.geom_type == "MultiPolygon":
-            # Convert each polygon to its boundary
-            boundaries = []
-            for poly in sidewalk.geoms:
-                boundaries.append(poly.boundary)
-            # If there's only one boundary, use it directly; otherwise create MultiLineString
-            if len(boundaries) == 1:
-                sidewalk = boundaries[0]
-            else:
-                sidewalk = MultiLineString(boundaries)
-
-        # Now handle LineString and MultiLineString
-        if sidewalk.geom_type == "MultiLineString":
-            # Split each component line
-            for line in sidewalk.geoms:
-                if splitter.is_empty:
-                    new_sidewalks.append(line)
-                else:
-                    try:
-                        split_result = split(line, splitter)
-                        if hasattr(split_result, "geoms"):
-                            new_sidewalks.extend(list(split_result.geoms))
-                        else:
-                            new_sidewalks.append(split_result)
-                    except Exception:
-                        new_sidewalks.append(line)
-        elif sidewalk.geom_type == "LineString":
-            # Split the line directly
-            if splitter.is_empty:
-                new_sidewalks.append(sidewalk)
-            else:
-                try:
-                    split_result = split(sidewalk, splitter)
-                    if hasattr(split_result, "geoms"):
-                        new_sidewalks.extend(list(split_result.geoms))
-                    else:
-                        new_sidewalks.append(split_result)
-                except Exception:
-                    new_sidewalks.append(sidewalk)
-        else:
-            # For unsupported geometry types (Point, etc.), return empty geometry
-            if sidewalk.geom_type in ["Point", "MultiPoint"]:
-                new_sidewalks.append(Point().boundary)  # Empty geometry
-            else:
-                new_sidewalks.append(sidewalk)
-
-    gdf = gpd.GeoDataFrame(geometry=new_sidewalks)
-    gdf = gdf.set_crs(sidewalks_gdf.crs)
-    return gdf
+    corners = polygon_parts.exterior.get_coordinates().to_numpy()
+    if len(corners) == 0:
+        return sidewalks_gdf
+    unique_corners = np.unique(corners, axis=0)
+    return _split_geometries_by_points(
+        sidewalks_gdf,
+        shapely.points(unique_corners),
+        show_progress=show_progress,
+        description="Splitting sidewalks at protoblock corners",
+    )
 
 
 def split_sidewalks_by_max_length(
-    sidewalks_gdf: gpd.GeoDataFrame, max_length: float
+    sidewalks_gdf: gpd.GeoDataFrame,
+    max_length: float,
+    show_progress: bool = False,
 ) -> gpd.GeoDataFrame:
     """Splits sidewalks into segments of a maximum length.
 
@@ -1960,7 +2970,14 @@ def split_sidewalks_by_max_length(
         A new GeoDataFrame containing the split sidewalk segments.
     """
     new_sidewalks = []
-    for sidewalk in sidewalks_gdf.geometry:
+    sidewalk_iter = _maybe_tqdm(
+        sidewalks_gdf.geometry,
+        show_progress,
+        total=len(sidewalks_gdf),
+        desc="Splitting sidewalks by maximum length",
+        unit="sidewalk",
+    )
+    for sidewalk in sidewalk_iter:
         # Add defensive checks
         if sidewalk is None or sidewalk.is_empty or not sidewalk.is_valid:
             continue
@@ -2012,7 +3029,9 @@ def split_sidewalks_by_max_length(
 
 
 def split_sidewalks_by_num_segments(
-    sidewalks_gdf: gpd.GeoDataFrame, num_segments: int
+    sidewalks_gdf: gpd.GeoDataFrame,
+    num_segments: int,
+    show_progress: bool = False,
 ) -> gpd.GeoDataFrame:
     """Splits sidewalks into a specified number of equal-length segments.
 
@@ -2024,7 +3043,14 @@ def split_sidewalks_by_num_segments(
         A new GeoDataFrame containing the split sidewalk segments.
     """
     new_sidewalks = []
-    for sidewalk in sidewalks_gdf.geometry:
+    sidewalk_iter = _maybe_tqdm(
+        sidewalks_gdf.geometry,
+        show_progress,
+        total=len(sidewalks_gdf),
+        desc="Splitting sidewalks by segment count",
+        unit="sidewalk",
+    )
+    for sidewalk in sidewalk_iter:
         segment_length = sidewalk.length / num_segments
         splitter_points = [
             sidewalk.interpolate((i + 1) * segment_length)
@@ -2043,7 +3069,9 @@ from shapely.validation import make_valid
 
 
 def clean_geometries_gdf(
-    gdf: gpd.GeoDataFrame, tolerance: float = 0.1
+    gdf: gpd.GeoDataFrame,
+    tolerance: float = 0.1,
+    show_progress: bool = False,
 ) -> gpd.GeoDataFrame:
     """Cleans geometries in a GeoDataFrame.
 
@@ -2060,29 +3088,41 @@ def clean_geometries_gdf(
     Returns:
         A new GeoDataFrame with cleaned geometries.
     """
-    cleaned_geometries = []
-    for geom in gdf.geometry:
-        if geom is None or geom.is_empty:
-            continue
+    geometries = np.asarray(gdf.geometry.array, dtype=object)
+    geometries = geometries[
+        ~shapely.is_missing(geometries) & ~shapely.is_empty(geometries)
+    ]
+    if len(geometries) == 0:
+        return gpd.GeoDataFrame(geometry=[], crs=gdf.crs)
 
-        # Make geometry valid
-        valid_geom = make_valid(geom)
-
-        # Simplify geometry
-        simplified_geom = valid_geom.simplify(tolerance)
-
-        # Snap geometry to grid
-        snapped_geom = shapely.set_precision(simplified_geom, tolerance)
-
-        # set_precision can result in empty geometries if they collapse
-        if not snapped_geom.is_empty:
-            cleaned_geometries.append(snapped_geom)
-
-    return gpd.GeoDataFrame(geometry=cleaned_geometries, crs=gdf.crs)
+    progress = tqdm(
+        total=3,
+        desc="Cleaning split sidewalk geometries",
+        unit="operation",
+        disable=not show_progress,
+        position=1,
+        leave=False,
+        dynamic_ncols=True,
+    )
+    geometries = shapely.make_valid(geometries)
+    progress.update(1)
+    geometries = _parallel_simplify(
+        geometries,
+        tolerance,
+        preserve_topology=True,
+    )
+    progress.update(1)
+    geometries = shapely.set_precision(geometries, tolerance)
+    progress.update(1)
+    progress.close()
+    geometries = geometries[~shapely.is_empty(geometries)]
+    return gpd.GeoDataFrame(geometry=geometries, crs=gdf.crs)
 
 
 def merge_short_segments_gdf(
-    sidewalks_gdf: gpd.GeoDataFrame, min_stretch_size: float
+    sidewalks_gdf: gpd.GeoDataFrame,
+    min_stretch_size: float,
+    show_progress: bool = False,
 ) -> gpd.GeoDataFrame:
     """Merges sidewalk segments shorter than a specified length with their neighbors.
 
@@ -2100,57 +3140,98 @@ def merge_short_segments_gdf(
     if min_stretch_size is None or min_stretch_size <= 0:
         return sidewalks_gdf
 
-    geometries = list(sidewalks_gdf.geometry)
+    geometries = [
+        geometry
+        for geometry in sidewalks_gdf.geometry
+        if geometry is not None and not geometry.is_empty
+    ]
+    lengths = [geometry.length for geometry in geometries]
+    short_indexes = [
+        index for index, length in enumerate(lengths) if length < min_stretch_size
+    ]
+    short_count = len(short_indexes)
+    if short_count == 0:
+        return gpd.GeoDataFrame(geometry=geometries, crs=sidewalks_gdf.crs)
 
-    while True:
-        merged_in_iteration = False
+    progress = tqdm(
+        total=short_count,
+        desc="Merging short sidewalk segments",
+        unit="segment",
+        disable=not show_progress,
+        position=1,
+        leave=False,
+        dynamic_ncols=True,
+    )
 
-        # Find the first short segment
-        short_segment_idx = -1
-        for i, geom in enumerate(geometries):
-            if geom.length < min_stretch_size:
-                short_segment_idx = i
-                break
+    from shapely.ops import linemerge
 
-        if short_segment_idx == -1:
-            # No more short segments
-            break
+    def endpoint_keys(geometry):
+        if geometry.geom_type != "LineString" or geometry.is_empty:
+            return ()
+        coordinates = geometry.coords
+        return (tuple(coordinates[0]), tuple(coordinates[-1]))
 
-        short_segment = geometries[short_segment_idx]
+    active = set(range(len(geometries)))
+    keys_by_index = {}
+    endpoint_members: dict[tuple, set[int]] = {}
 
-        # Find neighbors
-        neighbors = []
-        for i, geom in enumerate(geometries):
-            if i != short_segment_idx and geom.touches(short_segment):
-                neighbors.append((i, geom))
+    def add_to_endpoints(index, geometry):
+        keys = endpoint_keys(geometry)
+        keys_by_index[index] = keys
+        for key in keys:
+            endpoint_members.setdefault(key, set()).add(index)
 
-        if neighbors:
-            # Find the shortest neighbor
-            shortest_neighbor_idx, shortest_neighbor = min(
-                neighbors, key=lambda x: x[1].length
-            )
+    def remove_from_endpoints(index):
+        for key in keys_by_index.get(index, ()):
+            members = endpoint_members.get(key)
+            if members is not None:
+                members.discard(index)
 
-            # Merge the short segment with its shortest neighbor
-            from shapely.ops import linemerge
+    for index, geometry in enumerate(geometries):
+        add_to_endpoints(index, geometry)
 
-            merged_line = linemerge([short_segment, shortest_neighbor])
+    queue = [(lengths[index], index) for index in short_indexes]
+    heapq.heapify(queue)
+    while queue:
+        _, short_index = heapq.heappop(queue)
+        if short_index not in active:
+            continue
+        short_geometry = geometries[short_index]
+        if short_geometry.length >= min_stretch_size:
+            continue
 
-            # Remove the old segments and add the new one
-            # Important: remove the one with the larger index first
-            idx1, idx2 = sorted(
-                [short_segment_idx, shortest_neighbor_idx], reverse=True
-            )
-            geometries.pop(idx1)
-            geometries.pop(idx2)
-            geometries.append(merged_line)
+        neighbor_indexes = set()
+        for key in keys_by_index.get(short_index, ()):
+            neighbor_indexes.update(endpoint_members.get(key, ()))
+        neighbor_indexes.discard(short_index)
+        neighbor_indexes.intersection_update(active)
+        if not neighbor_indexes:
+            continue
 
-            merged_in_iteration = True
+        neighbor_index = min(
+            neighbor_indexes,
+            key=lambda index: geometries[index].length,
+        )
+        merged_geometry = linemerge(
+            [short_geometry, geometries[neighbor_index]]
+        )
 
-        if not merged_in_iteration:
-            # Avoid infinite loops if a short segment has no neighbors
-            break
+        active.remove(short_index)
+        active.remove(neighbor_index)
+        remove_from_endpoints(short_index)
+        remove_from_endpoints(neighbor_index)
 
-    return gpd.GeoDataFrame(geometry=geometries, crs=sidewalks_gdf.crs)
+        merged_index = len(geometries)
+        geometries.append(merged_geometry)
+        active.add(merged_index)
+        add_to_endpoints(merged_index, merged_geometry)
+        if merged_geometry.length < min_stretch_size:
+            heapq.heappush(queue, (merged_geometry.length, merged_index))
+        progress.update(1)
+
+    progress.close()
+    remaining = [geometries[index] for index in sorted(active)]
+    return gpd.GeoDataFrame(geometry=remaining, crs=sidewalks_gdf.crs)
 
 
 def split_sidewalks_gdf(
@@ -2181,81 +3262,53 @@ def split_sidewalks_gdf(
         A new GeoDataFrame containing the comprehensively split sidewalk segments.
     """
     sidewalks_gdf = split_sidewalks_by_protoblock_corners(
-        sidewalks_gdf, protoblocks_gdf
+        sidewalks_gdf,
+        protoblocks_gdf,
+        show_progress=show_progress,
     )
-    sidewalks_gdf = split_sidewalks_by_voronoi(sidewalks_gdf, pois_gdf)
+    sidewalks_gdf = split_sidewalks_by_voronoi(
+        sidewalks_gdf,
+        pois_gdf,
+        show_progress=show_progress,
+    )
 
     if max_length:
-        sidewalks_gdf = split_sidewalks_by_max_length(sidewalks_gdf, max_length)
+        sidewalks_gdf = split_sidewalks_by_max_length(
+            sidewalks_gdf,
+            max_length,
+            show_progress=show_progress,
+        )
 
     if num_segments:
-        sidewalks_gdf = split_sidewalks_by_num_segments(sidewalks_gdf, num_segments)
+        sidewalks_gdf = split_sidewalks_by_num_segments(
+            sidewalks_gdf,
+            num_segments,
+            show_progress=show_progress,
+        )
 
     if intersection_points_gdf.empty:
         return sidewalks_gdf
 
-    # Create a single MultiPoint geometry of all intersection points
-    splitter = MultiPoint(intersection_points_gdf.geometry.tolist())
-
-    # Split the sidewalks (defensive: handle different geom types and empty splitter)
-    new_sidewalks = []
-    sidewalk_iter = _maybe_tqdm(
-        sidewalks_gdf.geometry,
-        show_progress,
-        total=len(sidewalks_gdf),
-        desc="Splitting sidewalks at crossings",
-        unit="sidewalk",
+    crossing_points = np.asarray(
+        intersection_points_gdf.geometry.array,
+        dtype=object,
     )
-    for geom in sidewalk_iter:
-        if geom is None or geom.is_empty:
-            continue
-
-        # normalize to a LineString/MultiLineString to split
-        if geom.geom_type in ("Polygon", "MultiPolygon"):
-            sidewalk = geom.boundary
-        elif geom.geom_type in ("LineString", "MultiLineString"):
-            sidewalk = geom
-        else:
-            # unsupported geometry (Point/MultiPoint etc.) - skip
-            continue
-
-        if sidewalk.is_empty:
-            continue
-
-        # if splitter is empty, keep original sidewalk
-        try:
-            if splitter is None or splitter.is_empty:
-                new_sidewalks.append(sidewalk)
-                continue
-        except Exception:
-            new_sidewalks.append(sidewalk)
-            continue
-
-        # Attempt splitting; if Shapely raises, fall back to original
-        try:
-            new_sidewalk_parts = split(sidewalk, splitter)
-        except Exception:
-            new_sidewalks.append(sidewalk)
-            continue
-
-        # Collect parts
-        if hasattr(new_sidewalk_parts, "geoms"):
-            for part in new_sidewalk_parts.geoms:
-                new_sidewalks.append(part)
-        else:
-            new_sidewalks.append(new_sidewalk_parts)
-
-    gdf = gpd.GeoDataFrame(geometry=new_sidewalks)
-    try:
-        gdf = gdf.set_crs(sidewalks_gdf.crs)
-    except Exception:
-        gdf.crs = sidewalks_gdf.crs
+    gdf = _split_geometries_by_points(
+        sidewalks_gdf,
+        crossing_points,
+        show_progress=show_progress,
+        description="Splitting sidewalks at crossings",
+    )
 
     # Clean the final geometries
-    gdf = clean_geometries_gdf(gdf)
+    gdf = clean_geometries_gdf(gdf, show_progress=show_progress)
 
     # Merge short segments
-    gdf = merge_short_segments_gdf(gdf, min_stretch_size)
+    gdf = merge_short_segments_gdf(
+        gdf,
+        min_stretch_size,
+        show_progress=show_progress,
+    )
 
     return gdf
 
@@ -2277,7 +3330,10 @@ def calculate_sidewalk_properties(sidewalks_gdf: gpd.GeoDataFrame) -> gpd.GeoDat
     return sidewalks_gdf
 
 
-def generate_kerbs_gdf(crossings_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+def generate_kerbs_gdf(
+    crossings_gdf: gpd.GeoDataFrame,
+    show_progress: bool = False,
+) -> gpd.GeoDataFrame:
     """Generates kerbs from crossings using the ABCDE points system.
 
     This function extracts kerb points B and D from each crossing line that
@@ -2289,30 +3345,49 @@ def generate_kerbs_gdf(crossings_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     Returns:
         A GeoDataFrame of kerb points.
     """
-    kerbs = []
+    progress = tqdm(
+        total=3,
+        desc="Generating kerbs",
+        unit="operation",
+        disable=not show_progress,
+        position=1,
+        leave=False,
+        dynamic_ncols=True,
+    )
+    geometries = np.asarray(crossings_gdf.geometry.array, dtype=object)
+    valid = (
+        ~shapely.is_missing(geometries)
+        & ~shapely.is_empty(geometries)
+        & (shapely.get_type_id(geometries) == 1)
+    )
+    geometries = geometries[valid]
+    coordinate_counts = shapely.get_num_coordinates(geometries)
+    has_endpoints = coordinate_counts >= 2
+    geometries = geometries[has_endpoints]
+    coordinate_counts = coordinate_counts[has_endpoints]
+    progress.update(1)
 
-    for line in crossings_gdf.geometry:
-        if line.geom_type != "LineString":
-            continue
-
-        coords = list(line.coords)
-
-        # If crossing follows ABCDE pattern (5 points), extract B and D
-        if len(coords) == 5:
-            # Points B and D are at indices 1 and 3
-            point_b = Point(coords[1])
-            point_d = Point(coords[3])
-            kerbs.extend([point_b, point_d])
-        elif len(coords) >= 2:
-            # Fallback: use start and end points
-            start_point = Point(coords[0])
-            end_point = Point(coords[-1])
-            kerbs.extend([start_point, end_point])
-
-    if not kerbs:
+    if len(geometries) == 0:
+        progress.close()
         return gpd.GeoDataFrame(geometry=[], crs=crossings_gdf.crs)
 
-    return gpd.GeoDataFrame(geometry=kerbs, crs=crossings_gdf.crs)
+    five_point = coordinate_counts == 5
+    first_kerbs = np.empty(len(geometries), dtype=object)
+    second_kerbs = np.empty(len(geometries), dtype=object)
+    first_kerbs[five_point] = shapely.get_point(geometries[five_point], 1)
+    second_kerbs[five_point] = shapely.get_point(geometries[five_point], 3)
+    fallback = ~five_point
+    first_kerbs[fallback] = shapely.get_point(geometries[fallback], 0)
+    second_kerbs[fallback] = shapely.get_point(geometries[fallback], -1)
+    progress.update(1)
+
+    kerbs = np.empty(len(geometries) * 2, dtype=object)
+    kerbs[0::2] = first_kerbs
+    kerbs[1::2] = second_kerbs
+    result = gpd.GeoDataFrame(geometry=kerbs, crs=crossings_gdf.crs)
+    progress.update(1)
+    progress.close()
+    return result
 
 
 def draw_sidewalks_gdf(
@@ -2322,6 +3397,7 @@ def draw_sidewalks_gdf(
     buffer_dist: float,
     curve_radius: float,
     min_d_to_building: float,
+    show_progress: bool = False,
 ) -> gpd.GeoDataFrame:
     """Generates sidewalks using the proper algorithm from the QGIS plugin.
 
@@ -2347,10 +3423,25 @@ def draw_sidewalks_gdf(
     """
     from .parameters import big_buffer_d
 
+    progress = tqdm(
+        total=6,
+        desc="Constructing sidewalk geometry",
+        unit="operation",
+        disable=not show_progress,
+        position=1,
+        leave=False,
+        dynamic_ncols=True,
+    )
+
     # Step 1: Adjust buffer distance for buildings
     gdf_with_buffers = adjust_buffer_for_buildings(
-        gdf, buildings_gdf, buffer_dist, min_d_to_building
+        gdf,
+        buildings_gdf,
+        buffer_dist,
+        min_d_to_building,
+        show_progress=show_progress,
     )
+    progress.update(1)
 
     # Step 2: Calculate dynamic buffer distances
     # Buffer distance = (road_width / 2) + (extra_distance / 2)
@@ -2361,40 +3452,183 @@ def draw_sidewalks_gdf(
         gdf_with_buffers["buffer_dist"] / 2
     )
 
-    # Step 3: Buffer each road segment and dissolve
-    buffered_roads = gdf_with_buffers.buffer(gdf_with_buffers["dynamic_buffer"])
-    dissolved_roads = buffered_roads.union_all()
+    dynamic_buffers = gdf_with_buffers["dynamic_buffer"].to_numpy(dtype=float)
 
-    # Step 4: Two-step buffering for smooth corners
-    # Positive buffer with curve radius
-    smooth_roads = dissolved_roads.buffer(curve_radius)
-    # Negative buffer with same radius
-    smooth_roads = smooth_roads.buffer(-curve_radius)
+    sidewalk_gs = None
+    line_geometries = np.asarray(gdf_with_buffers.geometry.array, dtype=object)
+    valid_lines = (
+        ~shapely.is_missing(line_geometries)
+        & ~shapely.is_empty(line_geometries)
+        & np.isin(shapely.get_type_id(line_geometries), [1, 5])
+    )
+    line_geometries = line_geometries[valid_lines]
+    line_buffers = dynamic_buffers[valid_lines]
+    uniform_buffer = (
+        len(line_buffers) > 0
+        and np.isfinite(line_buffers).all()
+        and np.allclose(line_buffers, line_buffers[0])
+    )
 
-    # Step 5: Create very large buffer around entire network
-    large_buffer = smooth_roads.buffer(big_buffer_d)
+    # Polygonizing first restricts all buffering work to bounded block interiors.
+    # It avoids a municipality-wide union of overlapping road buffers and the
+    # former 10 km exterior buffer/difference.
+    if len(line_geometries):
+        noded_linework = shapely.union_all(line_geometries)
+        polygonized, cuts, dangles, invalid_rings = shapely.polygonize_full(
+            shapely.get_parts(noded_linework)
+        )
+        blocks = shapely.get_parts(polygonized)
+        leftover_lines = np.concatenate(
+            [shapely.get_parts(part) for part in (cuts, dangles, invalid_rings)]
+        )
+        leftover_lines = leftover_lines[
+            ~shapely.is_empty(leftover_lines)
+            & np.isin(shapely.get_type_id(leftover_lines), [1, 2, 5])
+        ]
+    else:
+        blocks = np.empty(0, dtype=object)
+        leftover_lines = np.empty(0, dtype=object)
+    progress.update(1)
 
-    # Step 6: Extract sidewalks using difference operation
-    # The difference gives us areas outside the road network
-    sidewalk_areas = large_buffer.difference(smooth_roads)
+    if len(blocks):
+        base_buffer = float(line_buffers[0] if uniform_buffer else np.min(line_buffers))
+        variable_mask = line_buffers > base_buffer + 1e-9
+        sidewalk_areas = _parallel_buffer(
+            blocks,
+            -base_buffer,
+            quad_segs=16,
+        )
 
-    # Convert to GeoSeries and explode to handle MultiPolygons/GeometryCollections
-    sidewalk_gs = gpd.GeoSeries([sidewalk_areas], crs=gdf.crs).explode(index_parts=False)
+        correction_geometries = []
+        correction_distances = []
+        if len(leftover_lines):
+            correction_geometries.append(leftover_lines)
+            correction_distances.append(
+                np.full(len(leftover_lines), base_buffer, dtype=float)
+            )
+        if np.any(variable_mask):
+            correction_geometries.append(line_geometries[variable_mask])
+            correction_distances.append(line_buffers[variable_mask])
 
-    # Filter out the largest polygon (surrounding area) and keep internal ones
-    if len(sidewalk_gs) > 1:
-        # Sort by area and remove the largest (external boundary)
-        sidewalk_gs = sidewalk_gs.iloc[sidewalk_gs.area.argsort()[:-1]]
+        if correction_geometries:
+            correction_geometries = np.concatenate(correction_geometries)
+            correction_distances = np.concatenate(correction_distances)
+            if show_progress:
+                print(
+                    "   Sidewalks: applying "
+                    f"{int(np.count_nonzero(variable_mask))} variable offsets and "
+                    f"{len(leftover_lines)} non-ring road offsets over "
+                    f"{len(blocks)} blocks."
+                )
+            correction_progress = tqdm(
+                total=4,
+                desc="Applying local sidewalk offsets",
+                unit="operation",
+                disable=not show_progress,
+                position=1,
+                leave=False,
+                dynamic_ncols=True,
+            )
+            correction_buffers = _parallel_buffer(
+                correction_geometries,
+                correction_distances,
+                quad_segs=16,
+            )
+            correction_progress.update(1)
+            pairs = STRtree(correction_buffers).query(
+                sidewalk_areas,
+                predicate="intersects",
+            )
+            correction_progress.update(1)
+            if pairs.shape[1]:
+                order = np.argsort(pairs[0], kind="stable")
+                block_indexes = pairs[0][order]
+                buffer_indexes = pairs[1][order]
+                counts = np.bincount(block_indexes, minlength=len(blocks))
+                max_count = int(counts.max())
+                grouped_buffers = np.full(
+                    (len(blocks), max_count),
+                    None,
+                    dtype=object,
+                )
+                group_offsets = np.repeat(
+                    np.cumsum(counts) - counts,
+                    counts,
+                )
+                positions = np.arange(len(block_indexes)) - group_offsets
+                grouped_buffers[block_indexes, positions] = correction_buffers[
+                    buffer_indexes
+                ]
+                local_road_buffers = _parallel_union_rows(grouped_buffers)
+                sidewalk_areas = _parallel_difference(
+                    sidewalk_areas,
+                    local_road_buffers,
+                )
+            correction_progress.update(2)
+            correction_progress.close()
+        progress.update(1)
+
+        if curve_radius > 0:
+            sidewalk_areas = _parallel_buffer(
+                _parallel_buffer(
+                    sidewalk_areas,
+                    -curve_radius,
+                    quad_segs=16,
+                ),
+                curve_radius,
+                quad_segs=16,
+            )
+        progress.update(1)
+
+        sidewalk_areas = sidewalk_areas[
+            ~shapely.is_empty(sidewalk_areas)
+            & np.isin(shapely.get_type_id(sidewalk_areas), [3, 6])
+        ]
+        if len(sidewalk_areas):
+            boundary_parts = shapely.get_parts(shapely.boundary(sidewalk_areas))
+            boundary_parts = boundary_parts[
+                ~shapely.is_empty(boundary_parts)
+                & np.isin(shapely.get_type_id(boundary_parts), [1, 2])
+            ]
+            sidewalk_gs = gpd.GeoSeries(boundary_parts, crs=gdf.crs)
+
+    if sidewalk_gs is None:
+        # Open networks do not have bounded blocks; retain the legacy behavior
+        # for standalone callers that expect output from such input.
+        buffered_roads = gdf_with_buffers.buffer(
+            gdf_with_buffers["dynamic_buffer"]
+        )
+        dissolved_roads = buffered_roads.union_all()
+        progress.update(1)
+
+        smooth_roads = dissolved_roads.buffer(curve_radius)
+        smooth_roads = smooth_roads.buffer(-curve_radius)
+        progress.update(1)
+
+        large_buffer = smooth_roads.buffer(big_buffer_d)
+        sidewalk_areas = large_buffer.difference(smooth_roads)
+        progress.update(1)
+
+        sidewalk_gs = gpd.GeoSeries(
+            [sidewalk_areas], crs=gdf.crs
+        ).explode(index_parts=False)
+
+        if len(sidewalk_gs) > 1:
+            sidewalk_gs = sidewalk_gs.iloc[sidewalk_gs.area.argsort()[:-1]]
 
     if sidewalk_gs.empty:
+        progress.close()
         return gpd.GeoDataFrame(geometry=[], crs=gdf.crs)
 
-    # Step 7: Convert to lines (boundaries)
-    # Vectorized extraction of boundaries and explode to handle MultiLineStrings
-    sidewalk_gs = sidewalk_gs.boundary.explode(index_parts=False)
+    # The legacy branch still contains polygons; the polygonized branch already
+    # contains their line boundaries.
+    if sidewalk_gs.geom_type.isin(["Polygon", "MultiPolygon"]).any():
+        sidewalk_gs = sidewalk_gs.boundary.explode(index_parts=False)
 
     if sidewalk_gs.empty:
+        progress.close()
         return gpd.GeoDataFrame(geometry=[], crs=gdf.crs)
+    progress.update(1)
 
     sidewalks_gdf = gpd.GeoDataFrame(geometry=sidewalk_gs, crs=gdf.crs)
 
@@ -2403,12 +3637,17 @@ def draw_sidewalks_gdf(
 
     # Step 9: Calculate properties
     sidewalks_gdf = calculate_sidewalk_properties(sidewalks_gdf)
+    progress.update(1)
+    progress.close()
 
     return sidewalks_gdf
 
 
 def data_clean_gdf(
-    gdf: gpd.GeoDataFrame, default_widths: dict, fallback_default_width: float
+    gdf: gpd.GeoDataFrame,
+    default_widths: dict,
+    fallback_default_width: float,
+    show_progress: bool = False,
 ) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame, gpd.GeoDataFrame]:
     """Cleans the OSM data in a GeoDataFrame.
 
@@ -2429,7 +3668,17 @@ def data_clean_gdf(
     """
 
     if "other_tags" in gdf.columns:
-        tags_series = gdf["other_tags"].apply(parse_tags)
+        tag_iter = _maybe_tqdm(
+            gdf["other_tags"].items(),
+            show_progress,
+            total=len(gdf),
+            desc="Cleaning OSM feature tags",
+            unit="feature",
+        )
+        tags_series = pd.Series(
+            {index: parse_tags(value) for index, value in tag_iter},
+            index=gdf.index,
+        )
         tags_df = pd.DataFrame(tags_series.tolist(), index=gdf.index)
         gdf = gdf.drop(columns=["other_tags"]).join(tags_df)
 

@@ -9,6 +9,46 @@ from headless_sidewalkreator import generate_protoblocks, sidewalkreator
 from headless_sidewalkreator import parameters as params
 
 
+def test_sidewalkreator_global_progress_tracks_all_pipeline_stages(
+    monkeypatch,
+    osm_sample_gdf,
+):
+    import headless_sidewalkreator.full_sidewalkreator_algorithm as algorithm
+
+    class FakeProgress:
+        def __init__(self):
+            self.completed = 0
+            self.closed = False
+
+        def update(self, amount):
+            self.completed += amount
+
+        def set_postfix_str(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            self.closed = True
+
+    progress = FakeProgress()
+    tqdm_mock = patch.object(algorithm, "tqdm", return_value=progress)
+    polygon = Polygon([(-1, -1), (-1, 2), (2, 2), (2, -1), (-1, -1)])
+    input_polygon_gdf = gpd.GeoDataFrame(geometry=[polygon], crs="EPSG:4326")
+    monkeypatch.setattr(algorithm, "save_debug_layer", lambda *args, **kwargs: None)
+
+    with tqdm_mock as mocked_tqdm:
+        algorithm.sidewalkreator(
+            input_polygon_gdf=input_polygon_gdf,
+            osm_gdf=osm_sample_gdf,
+            parameters={"show_progress": True},
+            ignore_existing=True,
+        )
+
+    assert mocked_tqdm.call_args.kwargs["total"] == 10
+    assert mocked_tqdm.call_args.kwargs["desc"] == "Sidewalkreator pipeline"
+    assert progress.completed == 10
+    assert progress.closed
+
+
 def test_sidewalkreator_basic(osm_sample_gdf):
     """Test basic functionality of sidewalkreator."""
     # Create a simple input polygon

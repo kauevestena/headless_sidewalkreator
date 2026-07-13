@@ -8,6 +8,7 @@ import time
 import geopandas as gpd
 import osmnx as ox
 from shapely.geometry import Polygon
+from tqdm import tqdm
 from .generic_functions import (
     get_bbox_from_gdf,
     bbox_to_gdf,
@@ -22,7 +23,6 @@ from .generic_functions import (
     handle_sidewalk_tags,
     draw_sidewalks_gdf,
     remove_lines_from_no_block_gdf,
-    filter_and_buffer_protoblocks_gdf,
     draw_crossings_gdf,
     split_sidewalks_gdf,
     generate_kerbs_gdf,
@@ -35,13 +35,38 @@ from .logging_config import get_logger
 logger = get_logger(__name__)
 
 
-def _run_timed_stage(label: str, progress_enabled: bool, func, *args, **kwargs):
+def _save_debug_layer_if_enabled(enabled: bool, gdf, layer_name: str):
+    if enabled:
+        save_debug_layer(gdf, layer_name)
+
+
+def _run_timed_stage(
+    label: str,
+    progress_enabled: bool,
+    func,
+    *args,
+    _overall_progress=None,
+    **kwargs,
+):
     if progress_enabled:
         print(f"   {label}...")
+        if _overall_progress is not None:
+            _overall_progress.set_postfix_str(label, refresh=True)
     start = time.perf_counter()
-    result = func(*args, **kwargs)
+    try:
+        result = func(*args, **kwargs)
+    except Exception:
+        if _overall_progress is not None:
+            _overall_progress.close()
+        raise
+    duration = time.perf_counter() - start
+    if _overall_progress is not None:
+        _overall_progress.update(1)
+        _overall_progress.set_postfix_str(
+            f"completed in {duration:.2f}s",
+            refresh=True,
+        )
     if progress_enabled:
-        duration = time.perf_counter() - start
         print(f"   {label} complete in {duration:.2f} seconds.")
     return result
 
@@ -149,6 +174,7 @@ def _preprocess_osm_data(
         clipped_reproj_gdf,
         default_widths,
         fallback_default_width,
+        show_progress=show_progress,
     )
     logger.info("Step 6 complete")
 
@@ -199,6 +225,7 @@ def _generate_protoblocks_from_splitted_lines(
     input_gdf: gpd.GeoDataFrame,
     splitted_gdf: gpd.GeoDataFrame,
     renode_before_polygonize: bool = False,
+    show_progress: bool = False,
 ) -> gpd.GeoDataFrame:
     """Generate protoblocks from an already preprocessed line network."""
     clip_geom = _get_polygonize_clip_geom(input_gdf, target_crs=splitted_gdf.crs)
@@ -206,6 +233,7 @@ def _generate_protoblocks_from_splitted_lines(
         splitted_gdf,
         clip_geom=clip_geom,
         node_lines=renode_before_polygonize,
+        show_progress=show_progress,
     )
 
 
@@ -271,6 +299,7 @@ def _draw_sidewalks(
         buffer_dist=run_params["buffer_dist"],
         curve_radius=run_params["default_curve_radius"],
         min_d_to_building=run_params["min_d_to_building"],
+        show_progress=run_params.get("show_progress", False),
     )
 
     # Handle sidewalk tags
@@ -283,12 +312,15 @@ def _apply_dead_end_removal(
     sidewalks_gdf: gpd.GeoDataFrame,
     ignore_existing: bool,
     dead_end_removal_iterations: int,
+    show_progress: bool = False,
 ) -> gpd.GeoDataFrame:
     """Remove lines from no-block zones (dead ends)."""
     # 11. Remove lines from no-block zones if ignore_existing is False
     if not ignore_existing:
         sidewalks_gdf = remove_lines_from_no_block_gdf(
-            sidewalks_gdf, iterations=dead_end_removal_iterations
+            sidewalks_gdf,
+            iterations=dead_end_removal_iterations,
+            show_progress=show_progress,
         )
     logger.info("Step 11 complete")
     return sidewalks_gdf
@@ -302,13 +334,10 @@ def _generate_crossings(
     ignore_existing: bool,
 ) -> gpd.GeoDataFrame:
     """Filter protoblocks and generate crossings."""
-    # 12. Filter and buffer protoblocks (for internal processing)
-    filtered_protoblocks_gdf = filter_and_buffer_protoblocks_gdf(
-        protoblocks_gdf,
-        sidewalks_gdf,
-        cutoff_percent=run_params["cutoff_percent_protoblock"],
-        ignore_existing=ignore_existing,
-    )
+    # draw_crossings_gdf currently keeps this argument for API compatibility but
+    # does not consume it. Avoid an expensive spatial join and dissolve whose
+    # result cannot affect the generated crossings.
+    filtered_protoblocks_gdf = protoblocks_gdf
     logger.info("Step 12 complete")
 
     # 13. Draw crossings using ABCDE algorithm
@@ -328,6 +357,7 @@ def _generate_crossings(
         max_ray_iterations=run_params["crossing_max_ray_iterations"],
         node_precision=run_params["crossing_node_precision"],
         show_progress=run_params.get("show_progress", False),
+        assume_noded=True,
     )
     logger.info("Step 13 complete")
     return crossings_gdf
@@ -358,7 +388,10 @@ def _finalize_results(
     logger.info("Step 14 complete")
 
     # 15. Generate kerbs
-    kerbs_gdf = generate_kerbs_gdf(crossings_gdf)
+    kerbs_gdf = generate_kerbs_gdf(
+        crossings_gdf,
+        show_progress=run_params.get("show_progress", False),
+    )
     logger.info("Step 15 complete")
     return splitted_sidewalks_gdf, kerbs_gdf, intersection_points_gdf
 
@@ -407,6 +440,7 @@ def generate_protoblocks(
         "protomaps_endpoint_snap_tolerance": params.protomaps_endpoint_snap_tolerance,
         "protomaps_endpoint_snap_max_angle": params.protomaps_endpoint_snap_max_angle,
         "show_progress": False,
+        "save_debug_layers": False,
     }
 
     if parameters:
@@ -442,6 +476,7 @@ def generate_protoblocks(
         input_gdf,
         splitted_gdf,
         renode_before_polygonize=run_params["renode_before_polygonize"],
+        show_progress=run_params["show_progress"],
     )
 
     logger.info("Step 8 complete")
@@ -515,6 +550,7 @@ def sidewalkreator(
         "protomaps_endpoint_snap_tolerance": params.protomaps_endpoint_snap_tolerance,
         "protomaps_endpoint_snap_max_angle": params.protomaps_endpoint_snap_max_angle,
         "show_progress": False,
+        "save_debug_layers": False,
     }
 
     if parameters:
@@ -522,6 +558,15 @@ def sidewalkreator(
 
     # 1-7. Core preprocessing
     show_progress = run_params.get("show_progress", False)
+    overall_progress = tqdm(
+        total=10,
+        desc="Sidewalkreator pipeline",
+        unit="stage",
+        disable=not show_progress,
+        position=0,
+        leave=True,
+        dynamic_ncols=True,
+    )
     input_gdf = _run_timed_stage(
         "Step 1: resolve input area",
         show_progress,
@@ -529,6 +574,7 @@ def sidewalkreator(
         place_name,
         input_polygon_gdf,
         bbox,
+        _overall_progress=overall_progress,
     )
     provider_kwargs = dict(run_params.get("provider_kwargs", {}))
     provider_kwargs.setdefault("show_progress", show_progress)
@@ -540,6 +586,7 @@ def sidewalkreator(
         osm_gdf,
         run_params["timeout"],
         provider=run_params.get("provider"),
+        _overall_progress=overall_progress,
         **provider_kwargs,
     )
     splitted_gdf, cleaned_gdf, clipped_reproj_gdf = _run_timed_stage(
@@ -559,6 +606,7 @@ def sidewalkreator(
             "protomaps_endpoint_snap_max_angle"
         ],
         show_progress=show_progress,
+        _overall_progress=overall_progress,
     )
     topology_stats = splitted_gdf.attrs.get("protomaps_topology")
     if topology_stats is not None:
@@ -567,9 +615,11 @@ def sidewalkreator(
     _run_timed_stage(
         "Debug: save split-line layer",
         show_progress,
-        save_debug_layer,
+        _save_debug_layer_if_enabled,
+        run_params["save_debug_layers"],
         splitted_gdf,
         "sidewalkreator_splitted_lines",
+        _overall_progress=overall_progress,
     )
 
     # 8. Create protoblocks from the line network already prepared above.
@@ -580,6 +630,8 @@ def sidewalkreator(
         input_gdf,
         splitted_gdf,
         renode_before_polygonize=run_params["renode_before_polygonize"],
+        show_progress=show_progress,
+        _overall_progress=overall_progress,
     )
     original_protoblocks_gdf = protoblocks_gdf.copy()
     logger.info("Step 8 complete")
@@ -591,6 +643,7 @@ def sidewalkreator(
         _extract_poi_data,
         cleaned_gdf,
         clipped_reproj_gdf,
+        _overall_progress=overall_progress,
     )
 
     # 10. Draw sidewalks
@@ -602,6 +655,7 @@ def sidewalkreator(
         buildings_gdf,
         cleaned_gdf,
         run_params,
+        _overall_progress=overall_progress,
     )
 
     # 11. Apply dead end removal
@@ -609,7 +663,11 @@ def sidewalkreator(
         "Step 11: remove dead ends",
         show_progress,
         _apply_dead_end_removal,
-        sidewalks_gdf, ignore_existing, run_params["dead_end_removal_iterations"]
+        sidewalks_gdf,
+        ignore_existing,
+        run_params["dead_end_removal_iterations"],
+        show_progress=show_progress,
+        _overall_progress=overall_progress,
     )
 
     # 12-13. Generate crossings
@@ -617,7 +675,12 @@ def sidewalkreator(
         "Steps 12-13: filter protoblocks and generate crossings",
         show_progress,
         _generate_crossings,
-        splitted_gdf, sidewalks_gdf, protoblocks_gdf, run_params, ignore_existing
+        splitted_gdf,
+        sidewalks_gdf,
+        protoblocks_gdf,
+        run_params,
+        ignore_existing,
+        _overall_progress=overall_progress,
     )
 
     # 14-15. Finalize results
@@ -630,7 +693,9 @@ def sidewalkreator(
         original_protoblocks_gdf,
         unified_pois_gdf,
         run_params,
+        _overall_progress=overall_progress,
     )
+    overall_progress.close()
 
     # Return all results as GeoDataFrames
     result = {

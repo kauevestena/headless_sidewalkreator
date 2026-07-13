@@ -335,6 +335,9 @@ class ProtomapsDownloader(PlanetDownloader):
                 desc="Fetching Protomaps tiles",
                 unit="tile",
                 disable=not show_progress,
+                position=1,
+                leave=False,
+                dynamic_ncols=True,
             )
             for future in tile_iter:
                 all_features.extend(future.result())

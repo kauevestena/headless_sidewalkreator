@@ -2,12 +2,14 @@ import math
 from pyproj.exceptions import CRSError
 import pytest
 import geopandas as gpd
+import shapely
+import numpy as np
 
 
 
 from shapely import wkt
 from shapely.geometry import LineString, Polygon, Point
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from headless_sidewalkreator.generic_functions import (
     fetch_street_network_for_bbox,
@@ -31,6 +33,11 @@ from headless_sidewalkreator.generic_functions import (
     calculate_tangent_direction,
     calculate_sidewalk_properties,
     reproject_gdf,
+    clip_gdf,
+    _parallel_buffer,
+    _parallel_difference,
+    _parallel_simplify,
+    _parallel_union_rows,
 )
 from headless_sidewalkreator.parameters import default_widths, fallback_default_width
 
@@ -57,6 +64,86 @@ def test_polygonize_lines_gdf():
     poly_gdf = polygonize_lines_gdf(gdf)
     assert len(poly_gdf) == 1
     assert isinstance(poly_gdf.geometry.iloc[0], Polygon)
+
+
+def test_clip_gdf_matches_geopandas_and_preserves_metadata():
+    source = gpd.GeoDataFrame(
+        {"name": ["inside", "crossing", "outside"]},
+        geometry=[
+            LineString([(1, 1), (2, 2)]),
+            LineString([(-1, 5), (5, 5)]),
+            LineString([(20, 20), (21, 21)]),
+        ],
+        crs="EPSG:3857",
+    )
+    source.attrs["provider"] = "protomaps"
+    mask = gpd.GeoDataFrame(
+        geometry=[Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])],
+        crs=source.crs,
+    )
+
+    expected = gpd.clip(source, mask).sort_index()
+    actual = clip_gdf(source, mask).sort_index()
+
+    assert actual.index.tolist() == expected.index.tolist()
+    assert actual["name"].tolist() == expected["name"].tolist()
+    assert all(
+        left.equals_exact(right, tolerance=1e-9)
+        for left, right in zip(actual.geometry, expected.geometry)
+    )
+    assert actual.attrs["provider"] == "protomaps"
+
+
+def test_parallel_geometry_helpers_match_shapely_operations():
+    polygons = np.asarray(
+        [
+            Polygon([(x, 0), (x + 4, 0), (x + 4, 4), (x, 4)])
+            for x in range(4)
+        ],
+        dtype=object,
+    )
+    distances = np.asarray([0.5, 1.0, 1.5, 2.0])
+    expected_buffers = shapely.buffer(polygons, distances, quad_segs=8)
+    actual_buffers = _parallel_buffer(
+        polygons,
+        distances,
+        quad_segs=8,
+        min_parallel_size=1,
+    )
+    assert np.all(shapely.equals_exact(expected_buffers, actual_buffers, tolerance=0))
+
+    grouped = np.asarray(
+        [[actual_buffers[0], actual_buffers[1]], [actual_buffers[2], None]],
+        dtype=object,
+    )
+    expected_unions = shapely.union_all(grouped, axis=1)
+    actual_unions = _parallel_union_rows(grouped, min_parallel_size=1)
+    assert np.all(shapely.equals_exact(expected_unions, actual_unions, tolerance=0))
+
+    expected_difference = shapely.difference(polygons[:2], actual_unions)
+    actual_difference = _parallel_difference(
+        polygons[:2],
+        actual_unions,
+        min_parallel_size=1,
+    )
+    assert np.all(
+        shapely.equals_exact(expected_difference, actual_difference, tolerance=0)
+    )
+
+    expected_simplified = shapely.simplify(
+        expected_buffers,
+        0.1,
+        preserve_topology=True,
+    )
+    actual_simplified = _parallel_simplify(
+        expected_buffers,
+        0.1,
+        preserve_topology=True,
+        min_parallel_size=1,
+    )
+    assert np.all(
+        shapely.equals_exact(expected_simplified, actual_simplified, tolerance=0)
+    )
 
 def test_split_lines_at_intersections_multipoint():
     """Test split_lines_at_intersections with MultiPoint intersections."""
@@ -182,23 +269,14 @@ def test_protomaps_topology_normalization_validates_parameters(
             endpoint_snap_max_angle=max_angle,
         )
 
-@patch('headless_sidewalkreator.generic_functions.ox')
-def test_remove_lines_from_no_block_gdf_osmnx_path(mock_ox):
-    """Test remove_lines_from_no_block_gdf with the osmnx path."""
+def test_remove_lines_from_no_block_gdf_prunes_degree_one_chain():
     line1 = LineString([(0, 0), (1, 1)])
     line2 = LineString([(1, 1), (2, 2)])
     gdf = gpd.GeoDataFrame(geometry=[line1, line2], crs="EPSG:4326")
 
-    # Mock the osmnx functions to return a graph
-    mock_graph = MagicMock()
-    mock_ox.graph_from_gdfs.return_value = mock_graph
-    # The function prunes the graph, so the output should be different.
-    # For this test, we just care about the osmnx path being taken.
-    # Let's return an empty gdf to make the test pass.
-    mock_ox.graph_to_gdfs.return_value = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
-
     cleaned_gdf = remove_lines_from_no_block_gdf(gdf)
-    mock_ox.graph_from_gdfs.assert_called_once()
+
+    assert cleaned_gdf.empty
 
 
 def test_remove_lines_from_no_block_gdf_empty_input():
@@ -322,6 +400,28 @@ def test_split_sidewalks_by_protoblock_corners_invalid_geometry():
     splitted_gdf = split_sidewalks_by_protoblock_corners(sidewalks_gdf, protoblocks_gdf)
     assert splitted_gdf.geometry.iloc[0].is_empty
 
+
+def test_split_sidewalks_by_protoblock_corners_uses_local_points():
+    sidewalks = gpd.GeoDataFrame(
+        geometry=[
+            LineString([(0, row), (10, row)])
+            for row in range(50)
+        ],
+        crs="EPSG:3857",
+    )
+    protoblocks = gpd.GeoDataFrame(
+        geometry=[
+            Polygon([(5, row), (5.5, row + 0.25), (4.5, row + 0.25)])
+            for row in range(50)
+        ],
+        crs=sidewalks.crs,
+    )
+
+    result = split_sidewalks_by_protoblock_corners(sidewalks, protoblocks)
+
+    assert len(result) == 100
+    assert result.length.sum() == pytest.approx(sidewalks.length.sum())
+
 def test_split_sidewalks_by_max_length():
     """Test split_sidewalks_by_max_length."""
     line = LineString([(0,0), (10,0)])
@@ -387,6 +487,100 @@ def test_draw_sidewalks_gdf(mock_adjust_buffer):
     )
     assert not sidewalks_gdf.empty
     mock_adjust_buffer.assert_called_once()
+
+
+def test_draw_sidewalks_does_not_close_sub_buffer_road_gap():
+    """Only genuinely polygonized road blocks produce sidewalk rings."""
+    lines = [
+        # Closed block.
+        LineString([(0, 0), (10, 0)]),
+        LineString([(10, 0), (10, 10)]),
+        LineString([(10, 10), (0, 10)]),
+        LineString([(0, 10), (0, 0)]),
+        # Almost-closed block whose 0.5 m gap was previously hidden by buffering.
+        LineString([(20, 0), (30, 0)]),
+        LineString([(30, 0), (30, 10)]),
+        LineString([(30, 10), (20, 10)]),
+        LineString([(20, 10), (20, 0.5)]),
+    ]
+    roads = gpd.GeoDataFrame(geometry=lines, crs="EPSG:3857")
+    buildings = gpd.GeoDataFrame(geometry=[], crs=roads.crs)
+
+    sidewalks = draw_sidewalks_gdf(
+        roads,
+        buildings,
+        roads,
+        buffer_dist=1.0,
+        curve_radius=0.0,
+        min_d_to_building=1.0,
+    )
+
+    assert len(sidewalks) == 1
+    assert sidewalks.total_bounds == pytest.approx([1.0, 1.0, 9.0, 9.0])
+
+
+def test_draw_sidewalks_preserves_non_ring_dead_end_road_offset():
+    lines = [
+        LineString([(0, 0), (20, 0)]),
+        LineString([(20, 0), (20, 20)]),
+        LineString([(20, 20), (0, 20)]),
+        LineString([(0, 20), (0, 0)]),
+        LineString([(0, 10), (10, 10)]),
+    ]
+    roads = gpd.GeoDataFrame(geometry=lines, crs="EPSG:3857")
+    buildings = gpd.GeoDataFrame(geometry=[], crs=roads.crs)
+
+    sidewalks = draw_sidewalks_gdf(
+        roads,
+        buildings,
+        roads,
+        buffer_dist=1.0,
+        curve_radius=0.0,
+        min_d_to_building=1.0,
+    )
+    block_inset = Polygon([(1, 1), (19, 1), (19, 19), (1, 19)])
+    expected = block_inset.difference(lines[-1].buffer(1.0))
+
+    assert sidewalks.geometry.union_all().equals(expected.boundary)
+
+
+def test_draw_sidewalks_preserves_variable_building_adjusted_offsets():
+    lines = [
+        LineString([(0, 0), (20, 0)]),
+        LineString([(20, 0), (20, 20)]),
+        LineString([(20, 20), (0, 20)]),
+        LineString([(0, 20), (0, 0)]),
+    ]
+    roads = gpd.GeoDataFrame(geometry=lines, crs="EPSG:3857")
+    buildings = gpd.GeoDataFrame(
+        geometry=[Polygon([(5, 1.5), (15, 1.5), (15, 2), (5, 2)])],
+        crs=roads.crs,
+    )
+
+    adjusted = adjust_buffer_for_buildings(roads, buildings, 2.0, 1.0)
+    distances = adjusted["buffer_dist"].to_numpy()
+    assert sorted(set(distances)) == [2.0, 3.0]
+
+    sidewalks = draw_sidewalks_gdf(
+        roads,
+        buildings,
+        roads,
+        buffer_dist=2.0,
+        curve_radius=0.0,
+        min_d_to_building=1.0,
+    )
+    block = Polygon([(0, 0), (20, 0), (20, 20), (0, 20)])
+    dynamic_distances = (2.0 + distances) / 2.0
+    expected_area = block.difference(
+        shapely.union_all(
+            shapely.buffer(lines, dynamic_distances, quad_segs=16)
+        )
+    )
+
+    assert sidewalks.geometry.union_all().equals_exact(
+        expected_area.boundary,
+        tolerance=1e-7,
+    )
 
 
 def test_adjust_buffer_for_buildings():
@@ -513,15 +707,103 @@ def test_draw_crossings_gdf_basic_crossings():
     assert crossings_gdf["length_ok"].all()
     assert not crossings_gdf["above_tolerance"].any()
 
+    batched_gdf = draw_crossings_gdf(
+        streets_gdf,
+        sidewalks_gdf,
+        curve_radius=0.0,
+        inward_offset=0.0,
+        extra_length=0.0,
+        increment_inward=0.5,
+        max_crossings_iterations=5,
+        abs_max_crossing_len=30,
+        perc_tol_crossings=10,
+        perc_draw_kerbs=25,
+        ray_growth_factor=1.5,
+        max_ray_iterations=3,
+        node_precision=6,
+        assume_noded=True,
+    )
+
+    assert batched_gdf["segment_id"].tolist() == crossings_gdf[
+        "segment_id"
+    ].tolist()
+    assert batched_gdf["node_degree"].tolist() == crossings_gdf[
+        "node_degree"
+    ].tolist()
+    assert batched_gdf["used_fallback"].tolist() == crossings_gdf[
+        "used_fallback"
+    ].tolist()
+    assert all(
+        expected.equals_exact(actual, tolerance=1e-7)
+        for expected, actual in zip(
+            crossings_gdf.geometry,
+            batched_gdf.geometry,
+        )
+    )
+
+
+def test_batched_crossings_matches_scalar_with_growing_rays():
+    streets = [
+        LineString([(-20, 0), (0, 0)]),
+        LineString([(0, 0), (20, 0)]),
+        LineString([(0, -20), (0, 0)]),
+        LineString([(0, 0), (0, 20)]),
+    ]
+    streets_gdf = gpd.GeoDataFrame(
+        {"width": [8.0] * 4},
+        geometry=streets,
+        crs="EPSG:3857",
+    )
+    sidewalks_gdf = gpd.GeoDataFrame(
+        geometry=[
+            LineString([(-25, 12), (25, 12)]),
+            LineString([(-25, -12), (25, -12)]),
+            LineString([(12, -25), (12, 25)]),
+            LineString([(-12, -25), (-12, 25)]),
+        ],
+        crs=streets_gdf.crs,
+    )
+    kwargs = {
+        "curve_radius": 0.0,
+        "inward_offset": 0.0,
+        "extra_length": 0.0,
+        "max_crossings_iterations": 2,
+        "abs_max_crossing_len": 30.0,
+        "perc_tol_crossings": 300.0,
+        "ray_growth_factor": 2.0,
+        "max_ray_iterations": 2,
+    }
+
+    scalar = draw_crossings_gdf(streets_gdf, sidewalks_gdf, **kwargs)
+    batched = draw_crossings_gdf(
+        streets_gdf,
+        sidewalks_gdf,
+        assume_noded=True,
+        **kwargs,
+    )
+
+    assert len(scalar) == len(batched) == 4
+    assert batched["length_m"].to_numpy() == pytest.approx([24.0] * 4)
+    assert all(
+        expected.equals_exact(actual, tolerance=1e-7)
+        for expected, actual in zip(scalar.geometry, batched.geometry)
+    )
+
 
 def test_generate_kerbs_gdf():
     """Test generate_kerbs_gdf."""
-    crossings = [LineString([(0, 0), (2, 2)]), LineString([(1, 1), (3, 3)])]
+    crossings = [
+        LineString([(0, 0), (2, 2)]),
+        LineString([(1, 1), (3, 3)]),
+        LineString([(4, 0), (4, 1), (4, 2), (4, 3), (4, 4)]),
+    ]
     crossings_gdf = gpd.GeoDataFrame(geometry=crossings, crs="EPSG:3857")
 
     kerbs_gdf = generate_kerbs_gdf(crossings_gdf)
-    assert len(kerbs_gdf) == 4
+    assert len(kerbs_gdf) == 6
     assert all(kerbs_gdf.geometry.type == "Point")
+    assert kerbs_gdf.geometry.iloc[-2].equals(Point(4, 1))
+    assert kerbs_gdf.geometry.iloc[-1].equals(Point(4, 3))
 
 
 from headless_sidewalkreator.generic_functions import merge_short_segments_gdf
@@ -541,6 +823,23 @@ def test_merge_short_segments_gdf():
     assert len(merged_gdf) < 3
     # The total length should be preserved
     assert sidewalks_gdf.geometry.length.sum() == merged_gdf.geometry.length.sum()
+
+
+def test_merge_short_segments_continues_after_isolated_segment():
+    lines = [
+        LineString([(100, 100), (101, 100)]),
+        LineString([(0, 0), (1, 0)]),
+        LineString([(1, 0), (10, 0)]),
+    ]
+    sidewalks_gdf = gpd.GeoDataFrame(geometry=lines, crs="EPSG:3857")
+
+    merged_gdf = merge_short_segments_gdf(
+        sidewalks_gdf,
+        min_stretch_size=2,
+    )
+
+    assert len(merged_gdf) == 2
+    assert sorted(merged_gdf.length) == pytest.approx([1.0, 10.0])
 
 
 def test_bbox_to_gdf():

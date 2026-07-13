@@ -272,7 +272,11 @@ def main():
         result = sidewalkreator(
             input_polygon_gdf=curitiba_gdf,
             osm_gdf=osm_gdf,
-            parameters={"timeout": 300},
+            parameters={
+                "timeout": 300,
+                "provider": chosen_provider,
+                "show_progress": True,
+            },
             ignore_existing=False,
         )
         duration_generate = time.time() - start_generate
