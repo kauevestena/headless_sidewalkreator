@@ -1,7 +1,8 @@
 import logging
+from numbers import Integral
 from typing import Tuple, Dict, Optional, Any
 import geopandas as gpd
-from shapely.geometry import shape
+from shapely.geometry import MultiLineString, box, shape
 from shapely.affinity import affine_transform
 import requests
 import gzip
@@ -24,6 +25,12 @@ from .base import PlanetDownloader
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_AUTO_ZOOM_TILE_BUDGET = 16
+DEFAULT_DETAIL_ZOOM = 15
+DEFAULT_LARGE_AREA_ZOOM = 14
+DEFAULT_TILE_WORKERS = 8
+
+
 class ProtomapsDownloader(PlanetDownloader):
     """Downloader for Protomaps data using PMTiles."""
 
@@ -44,6 +51,76 @@ class ProtomapsDownloader(PlanetDownloader):
     def _include_road_feature(self, properties):
         pmap_kind = properties.get("pmap:kind")
         return isinstance(pmap_kind, str) and pmap_kind.endswith("_road")
+
+    def _select_zoom(self, bbox, requested_zoom, header, tile_budget):
+        """Select and validate an explicit or adaptive archive zoom."""
+        if (
+            isinstance(tile_budget, bool)
+            or not isinstance(tile_budget, Integral)
+            or tile_budget <= 0
+        ):
+            raise ValueError("auto_zoom_tile_budget must be a positive integer")
+
+        min_zoom = int(header.get("min_zoom", 0)) if isinstance(header, dict) else 0
+        max_zoom = (
+            int(header.get("max_zoom", DEFAULT_DETAIL_ZOOM))
+            if isinstance(header, dict)
+            else DEFAULT_DETAIL_ZOOM
+        )
+
+        if requested_zoom in (None, "auto"):
+            detail_zoom = min(DEFAULT_DETAIL_ZOOM, max_zoom)
+            large_area_zoom = min(DEFAULT_LARGE_AREA_ZOOM, max_zoom)
+            if detail_zoom < min_zoom:
+                raise ValueError(
+                    f"Archive zoom range {min_zoom}-{max_zoom} is not usable"
+                )
+            detail_tile_count = len(self._tiles_for_bbox(bbox, detail_zoom))
+            if detail_tile_count <= tile_budget:
+                return detail_zoom
+            return max(min_zoom, large_area_zoom)
+
+        if isinstance(requested_zoom, bool) or not isinstance(
+            requested_zoom,
+            Integral,
+        ):
+            raise ValueError("zoom must be 'auto' or an integer")
+        requested_zoom = int(requested_zoom)
+        if requested_zoom < min_zoom or requested_zoom > max_zoom:
+            raise ValueError(
+                f"Requested zoom {requested_zoom} is outside archive range "
+                f"{min_zoom}-{max_zoom}"
+            )
+        return requested_zoom
+
+    @staticmethod
+    def _clip_road_to_tile_core(geom, tile_bounds):
+        """Remove MVT buffer overlap while preserving line components."""
+        tile_core = box(
+            tile_bounds.west,
+            tile_bounds.south,
+            tile_bounds.east,
+            tile_bounds.north,
+        )
+        clipped = geom.intersection(tile_core)
+        if clipped.is_empty:
+            return None
+        if clipped.geom_type in ("LineString", "MultiLineString"):
+            return clipped
+        if clipped.geom_type != "GeometryCollection":
+            return None
+
+        line_parts = []
+        for part in clipped.geoms:
+            if part.geom_type == "LineString":
+                line_parts.append(part)
+            elif part.geom_type == "MultiLineString":
+                line_parts.extend(part.geoms)
+        if not line_parts:
+            return None
+        if len(line_parts) == 1:
+            return line_parts[0]
+        return MultiLineString(line_parts)
 
     def _decompress_tile(self, tile_data, tile_compression):
         if tile_data.startswith(b'\x1f\x8b'):
@@ -100,6 +177,13 @@ class ProtomapsDownloader(PlanetDownloader):
                         tile_bounds.north,
                     ],
                 )
+                if layer_name == 'roads':
+                    geom_transformed = self._clip_road_to_tile_core(
+                        geom_transformed,
+                        tile_bounds,
+                    )
+                    if geom_transformed is None:
+                        continue
                 tile_features.append({
                     'geometry': geom_transformed,
                     'properties': properties
@@ -118,26 +202,14 @@ class ProtomapsDownloader(PlanetDownloader):
             logger.error("pmtiles or mapbox-vector-tile not installed.")
             return gpd.GeoDataFrame(columns=['geometry'], crs="EPSG:4326")
 
-        zoom = kwargs.get('zoom', 14)
+        requested_zoom = kwargs.get('zoom', 'auto')
+        auto_zoom_tile_budget = kwargs.get(
+            'auto_zoom_tile_budget',
+            DEFAULT_AUTO_ZOOM_TILE_BUDGET,
+        )
         request_timeout = kwargs.get('timeout', 60)
         max_retries = kwargs.get('max_retries', 2)
         show_progress = kwargs.get('show_progress', True)
-        tiles = self._tiles_for_bbox(bbox, zoom)
-        tile_workers = int(
-            kwargs.get(
-                'tile_workers',
-                kwargs.get('max_workers', min(8, max(1, len(tiles)))),
-            )
-        )
-        tile_workers = max(1, tile_workers)
-
-        logger.info(
-            "Fetching %s tiles for bbox %s at zoom %s with %s worker(s)",
-            len(tiles),
-            bbox,
-            zoom,
-            tile_workers,
-        )
 
         all_features = []
         thread_state = local()
@@ -204,6 +276,34 @@ class ProtomapsDownloader(PlanetDownloader):
             logger.error(f"Failed to read Protomaps PMTiles header: {e}")
             return gpd.GeoDataFrame(columns=['geometry'], crs="EPSG:4326")
 
+        zoom = self._select_zoom(
+            bbox,
+            requested_zoom,
+            header,
+            auto_zoom_tile_budget,
+        )
+        tiles = self._tiles_for_bbox(bbox, zoom)
+        requested_workers = kwargs.get('tile_workers', kwargs.get('max_workers'))
+        if requested_workers is None:
+            tile_workers = min(DEFAULT_TILE_WORKERS, max(1, len(tiles)))
+        else:
+            if (
+                isinstance(requested_workers, bool)
+                or not isinstance(requested_workers, Integral)
+                or requested_workers <= 0
+            ):
+                raise ValueError("tile_workers must be a positive integer")
+            tile_workers = int(requested_workers)
+            tile_workers = min(tile_workers, max(1, len(tiles)))
+
+        logger.info(
+            "Fetching %s tiles for bbox %s at zoom %s with %s worker(s)",
+            len(tiles),
+            bbox,
+            zoom,
+            tile_workers,
+        )
+
         def fetch_tile(tile):
             x, y, z = tile
             try:
@@ -224,7 +324,10 @@ class ProtomapsDownloader(PlanetDownloader):
 
             return []
 
-        with ThreadPoolExecutor(max_workers=min(tile_workers, len(tiles) or 1)) as executor:
+        fetch_started = time.perf_counter()
+        with ThreadPoolExecutor(
+            max_workers=min(tile_workers, len(tiles) or 1)
+        ) as executor:
             futures = [executor.submit(fetch_tile, tile) for tile in tiles]
             tile_iter = tqdm(
                 as_completed(futures),
@@ -235,9 +338,28 @@ class ProtomapsDownloader(PlanetDownloader):
             )
             for future in tile_iter:
                 all_features.extend(future.result())
+        fetch_duration = time.perf_counter() - fetch_started
+        logger.info(
+            "Fetched and decoded %s Protomaps tiles in %.3fs",
+            len(tiles),
+            fetch_duration,
+        )
+        if show_progress:
+            print(
+                f"Fetched and decoded {len(tiles)} Protomaps tiles at zoom "
+                f"{zoom} in {fetch_duration:.2f} seconds."
+            )
 
-        if not all_features:
-            return gpd.GeoDataFrame(columns=['geometry'], crs="EPSG:4326")
-
-        gdf = gpd.GeoDataFrame.from_features(all_features, crs="EPSG:4326")
+        if all_features:
+            gdf = gpd.GeoDataFrame.from_features(all_features, crs="EPSG:4326")
+        else:
+            gdf = gpd.GeoDataFrame(columns=['geometry'], crs="EPSG:4326")
+        gdf.attrs.update(
+            {
+                "provider": self.provider_name,
+                "zoom": zoom,
+                "tile_count": len(tiles),
+                "tile_workers": tile_workers,
+            }
+        )
         return gdf

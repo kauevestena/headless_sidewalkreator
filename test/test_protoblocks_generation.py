@@ -4,7 +4,12 @@ import geopandas as gpd
 import pytest
 from unittest.mock import patch
 from headless_sidewalkreator import generate_protoblocks
-from headless_sidewalkreator.full_sidewalkreator_algorithm import _get_polygonize_clip_geom
+from headless_sidewalkreator.full_sidewalkreator_algorithm import (
+    _get_polygonize_clip_geom,
+    _is_protomaps_source,
+    _preprocess_osm_data,
+)
+from headless_sidewalkreator.parameters import default_widths, fallback_default_width
 from shapely.geometry import Polygon
 
 
@@ -137,6 +142,70 @@ def test_generate_protoblocks_can_force_polygonize_renoding(
         )
 
     assert mock_polygonize.call_args.kwargs["node_lines"] is True
+
+
+def test_protomaps_source_detection_supports_metadata_columns_and_override(
+    osm_sample_gdf,
+):
+    generic = osm_sample_gdf.copy()
+    osmnx = osm_sample_gdf.copy()
+    osmnx.attrs["provider"] = "osmnx"
+    overture = osm_sample_gdf.copy()
+    overture.attrs["provider"] = "overture"
+    generic[123] = "not Protomaps metadata"
+    metadata = osm_sample_gdf.copy()
+    metadata.attrs["provider"] = "protomaps"
+    columns = osm_sample_gdf.copy()
+    columns["pmap:kind"] = "minor_road"
+
+    assert not _is_protomaps_source(generic)
+    assert not _is_protomaps_source(osmnx)
+    assert not _is_protomaps_source(overture)
+    assert _is_protomaps_source(metadata)
+    assert _is_protomaps_source(columns)
+    assert _is_protomaps_source(generic, provider="protomaps")
+
+
+@pytest.mark.parametrize("provider", ["osmnx", "overture"])
+def test_non_protomaps_preprocessing_is_not_topology_repaired(
+    provider,
+    test_polygon_gdf,
+    osm_sample_gdf,
+):
+    generic_lines, _, _ = _preprocess_osm_data(
+        osm_sample_gdf,
+        test_polygon_gdf,
+        default_widths,
+        fallback_default_width,
+    )
+    marked = osm_sample_gdf.copy()
+    marked.attrs["provider"] = provider
+    provider_lines, _, _ = _preprocess_osm_data(
+        marked,
+        test_polygon_gdf,
+        default_widths,
+        fallback_default_width,
+    )
+
+    assert "protomaps_topology" not in provider_lines.attrs
+    assert provider_lines.geometry.union_all().equals(generic_lines.geometry.union_all())
+
+
+def test_protomaps_topology_repair_can_be_disabled(
+    test_polygon_gdf,
+    osm_sample_gdf,
+):
+    marked = osm_sample_gdf.copy()
+    marked.attrs["provider"] = "protomaps"
+    lines, _, _ = _preprocess_osm_data(
+        marked,
+        test_polygon_gdf,
+        default_widths,
+        fallback_default_width,
+        repair_protomaps_topology=False,
+    )
+
+    assert "protomaps_topology" not in lines.attrs
 
 
 def test_polygonize_clip_geom_uses_target_crs_bounds():

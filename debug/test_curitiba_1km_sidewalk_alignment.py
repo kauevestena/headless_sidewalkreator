@@ -30,6 +30,8 @@ TARGET_BOX_COUNT = 1
 MIN_ROAD_FEATURES = 5
 MAX_RANDOM_ATTEMPTS = 250
 PROVIDERS = ("protomaps", "osmnx")
+TOPOLOGY_BOUNDARY_TOLERANCE_M = 0.5
+MIN_TOPOLOGY_GAP_LENGTH_M = 2.0
 OPTIONAL_OSM_COLUMNS = (
     "highway",
     "building",
@@ -83,10 +85,12 @@ def _safe_to_crs(gdf: gpd.GeoDataFrame, crs) -> gpd.GeoDataFrame:
 
 
 def _ensure_optional_osm_columns(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    source_attrs = dict(gdf.attrs)
     normalized = gdf.copy()
     for column in OPTIONAL_OSM_COLUMNS:
         if column not in normalized.columns:
             normalized[column] = None
+    normalized.attrs.update(source_attrs)
     return normalized
 
 
@@ -266,7 +270,11 @@ def _analyze_provider_for_box(
         result = sidewalkreator(
             input_polygon_gdf=box_wgs84,
             osm_gdf=raw_gdf,
-            parameters={"timeout": timeout, "show_progress": show_progress},
+            parameters={
+                "timeout": timeout,
+                "provider": provider,
+                "show_progress": show_progress,
+            },
             ignore_existing=False,
         )
         error = None
@@ -309,18 +317,63 @@ def _area_km2(gdf: gpd.GeoDataFrame, crs=PROJECTED_CRS) -> float:
     return _safe_to_crs(gdf, crs).geometry.area.sum() / 1e6
 
 
+def _topology_gap_segments(
+    roads_gdf: gpd.GeoDataFrame,
+    protoblocks_gdf: gpd.GeoDataFrame,
+    crs=PROJECTED_CRS,
+    boundary_tolerance_m: float = TOPOLOGY_BOUNDARY_TOLERANCE_M,
+    min_gap_length_m: float = MIN_TOPOLOGY_GAP_LENGTH_M,
+) -> gpd.GeoDataFrame:
+    """Return substantial road portions absent from protoblock boundaries."""
+    roads = _safe_to_crs(roads_gdf, crs)
+    protoblocks = _safe_to_crs(protoblocks_gdf, crs)
+    if roads.empty:
+        return _empty_gdf(crs)
+
+    if protoblocks.empty:
+        gaps = roads.copy()
+    else:
+        boundary = protoblocks.boundary.union_all().buffer(boundary_tolerance_m)
+        gaps = roads.copy()
+        gaps.geometry = roads.geometry.difference(boundary)
+
+    gaps = gaps[~gaps.geometry.is_empty].dropna(subset=["geometry"]).copy()
+    if gaps.empty:
+        return _empty_gdf(crs)
+    gaps = gaps.explode(index_parts=False, ignore_index=True)
+    gaps = gaps[gaps.geometry.geom_type.isin(["LineString", "MultiLineString"])]
+    gaps = gaps.explode(index_parts=False, ignore_index=True)
+    gaps = gaps[gaps.geometry.geom_type == "LineString"].copy()
+    gaps["gap_length_m"] = gaps.geometry.length
+    return gaps[gaps["gap_length_m"] > min_gap_length_m].copy()
+
+
+def _topology_stats(result: ProviderSidewalkAnalysis) -> dict:
+    if result.result is None:
+        return {}
+    return result.result.get("parameters", {}).get("protomaps_topology_stats", {})
+
+
 def _metrics_row(result: ProviderSidewalkAnalysis, box_wgs84: gpd.GeoDataFrame):
     sidewalks = _result_gdf(result.result, "sidewalks")
     crossings = _result_gdf(result.result, "crossings")
     protoblocks = _result_gdf(result.result, "protoblocks")
     box_area_km2 = _area_km2(box_wgs84)
     sidewalk_length_km = _length_km(sidewalks)
+    topology_gaps = _topology_gap_segments(result.roads, protoblocks)
+    road_length_km = _length_km(result.roads)
+    topology_gap_length_km = _length_km(topology_gaps)
+    topology_stats = _topology_stats(result)
+    topology_duration = topology_stats.get("duration_s", 0.0)
     return {
         "box_id": result.box_id,
         "provider": result.provider,
         "raw_feature_count": result.raw_count,
         "road_count": result.road_count,
-        "road_length_km": _length_km(result.roads),
+        "road_length_km": road_length_km,
+        "selected_zoom": result.raw.attrs.get("zoom"),
+        "tile_count": result.raw.attrs.get("tile_count"),
+        "tile_workers": result.raw.attrs.get("tile_workers"),
         "sidewalk_count": result.sidewalk_count,
         "sidewalk_length_km": sidewalk_length_km,
         "sidewalk_density_km_per_km2": (
@@ -331,6 +384,30 @@ def _metrics_row(result: ProviderSidewalkAnalysis, box_wgs84: gpd.GeoDataFrame):
         "kerb_count": result.kerb_count,
         "protoblock_count": result.protoblock_count,
         "protoblock_area_km2": _area_km2(protoblocks),
+        "unpolygonized_road_feature_count": len(topology_gaps),
+        "unpolygonized_road_length_km": topology_gap_length_km,
+        "road_boundary_coverage_pct": (
+            100.0 * max(0.0, 1.0 - topology_gap_length_km / road_length_km)
+            if road_length_km
+            else math.nan
+        ),
+        "topology_undershoots_repaired": topology_stats.get(
+            "undershoots_repaired",
+            0,
+        ),
+        "topology_overshoots_removed": topology_stats.get(
+            "overshoots_removed",
+            0,
+        ),
+        "topology_remaining_eligible_endpoints": topology_stats.get(
+            "remaining_eligible_endpoints"
+        ),
+        "duration_topology_normalization_s": topology_duration,
+        "topology_generation_pct": (
+            100.0 * topology_duration / result.duration_generate
+            if result.duration_generate
+            else math.nan
+        ),
         "poi_count": result.poi_count,
         "duration_fetch_s": result.duration_fetch,
         "duration_generate_s": result.duration_generate,
@@ -484,6 +561,20 @@ def run_sidewalk_diagnostic(
                 f"crossings={result.crossing_count}, "
                 f"kerbs={result.kerb_count}"
             )
+            if provider == "protomaps":
+                topology_stats = _topology_stats(result)
+                print(
+                    "         "
+                    f"raw={result.raw_count}, "
+                    f"zoom={result.raw.attrs.get('zoom')}, "
+                    f"tiles={result.raw.attrs.get('tile_count')}, "
+                    f"workers={result.raw.attrs.get('tile_workers')}, "
+                    f"undershoots={topology_stats.get('undershoots_repaired', 0)}, "
+                    f"overshoots={topology_stats.get('overshoots_removed', 0)}, "
+                    "remaining="
+                    f"{topology_stats.get('remaining_eligible_endpoints')}, "
+                    f"topology={topology_stats.get('duration_s', 0.0):.3f}s"
+                )
             if result.error:
                 print(f"      Rejecting candidate for {provider}: {result.error}")
                 valid = False
@@ -497,7 +588,18 @@ def run_sidewalk_diagnostic(
         print(f"      Accepted as random 1km sidewalk box {box_id}.")
 
         for result in result_by_provider.values():
-            metrics_rows.append(_metrics_row(result, candidate_wgs84))
+            metrics = _metrics_row(result, candidate_wgs84)
+            metrics_rows.append(metrics)
+            if result.provider == "protomaps":
+                print(
+                    "         "
+                    "unpolygonized roads="
+                    f"{metrics['unpolygonized_road_length_km']:.3f} km, "
+                    "road-boundary coverage="
+                    f"{metrics['road_boundary_coverage_pct']:.2f}%, "
+                    "topology/generation="
+                    f"{metrics['topology_generation_pct']:.2f}%"
+                )
 
     if len(boxes_wgs84) < target_count:
         raise RuntimeError(
@@ -527,6 +629,14 @@ def run_sidewalk_diagnostic(
                 _result_gdf(result.result, "protoblocks") for result in provider_results
             ],
         }
+        if provider == "protomaps":
+            layers["topology_gaps"] = [
+                _topology_gap_segments(
+                    result.roads,
+                    _result_gdf(result.result, "protoblocks"),
+                )
+                for result in provider_results
+            ]
 
         for layer_name, gdfs in layers.items():
             tagged_layers = [
@@ -570,6 +680,7 @@ def main():
     print("  debug/curitiba_1km_sidewalk_metrics.csv")
     print("  debug/curitiba_1km_sidewalk_alignment.png")
     print("  debug/curitiba_1km_{provider}_sidewalk_{layer}.geojson")
+    print("  debug/curitiba_1km_protomaps_sidewalk_topology_gaps.geojson")
     print("======================================================================")
 
 

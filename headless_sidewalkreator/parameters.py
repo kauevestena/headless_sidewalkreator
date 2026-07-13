@@ -174,6 +174,11 @@ duplicate_points_tol = 0.1
 # snap tolerance for disjointed (m):
 snap_disjointed_tol = 0.5
 
+# Protomaps MVT topology normalization defaults (projected metres/degrees).
+repair_protomaps_topology = True
+protomaps_endpoint_snap_tolerance = snap_disjointed_tol
+protomaps_endpoint_snap_max_angle = 45.0
+
 # minimum length that a sidewalk stretch should have (m):
 min_stretch_size = 7
 

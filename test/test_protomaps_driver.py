@@ -1,13 +1,233 @@
 import pytest
+import geopandas as gpd
 import mercantile
 import requests
 from unittest.mock import MagicMock, patch
+from headless_sidewalkreator.generic_functions import normalize_protomaps_topology
 from headless_sidewalkreator.planet_download.protomaps import ProtomapsDownloader
+from shapely.geometry import LineString
+
 
 def test_protomaps_downloader_init():
     dl = ProtomapsDownloader(url="https://example.com/map.pmtiles")
     assert dl.url == "https://example.com/map.pmtiles"
     assert dl.provider_name == "protomaps"
+
+
+def test_protomaps_adaptive_zoom_uses_detail_zoom_within_budget():
+    dl = ProtomapsDownloader()
+    with patch.object(
+        dl,
+        "_tiles_for_bbox",
+        side_effect=lambda bbox, zoom: [object()] * (16 if zoom == 15 else 4),
+    ):
+        zoom = dl._select_zoom(
+            (0, 0, 1, 1),
+            "auto",
+            {"min_zoom": 0, "max_zoom": 15},
+            tile_budget=16,
+        )
+
+    assert zoom == 15
+
+
+def test_protomaps_adaptive_zoom_falls_back_for_large_requests():
+    dl = ProtomapsDownloader()
+    with patch.object(
+        dl,
+        "_tiles_for_bbox",
+        side_effect=lambda bbox, zoom: [object()] * (17 if zoom == 15 else 5),
+    ):
+        zoom = dl._select_zoom(
+            (0, 0, 1, 1),
+            "auto",
+            {"min_zoom": 0, "max_zoom": 15},
+            tile_budget=16,
+        )
+
+    assert zoom == 14
+
+
+def test_protomaps_adaptive_tile_budget_can_be_overridden():
+    dl = ProtomapsDownloader()
+    with patch.object(
+        dl,
+        "_tiles_for_bbox",
+        return_value=[object()] * 17,
+    ):
+        zoom = dl._select_zoom(
+            (0, 0, 1, 1),
+            "auto",
+            {"min_zoom": 0, "max_zoom": 15},
+            tile_budget=17,
+        )
+
+    assert zoom == 15
+
+
+@pytest.mark.parametrize("tile_budget", [0, -1, 1.5, True])
+def test_protomaps_adaptive_zoom_rejects_invalid_tile_budget(tile_budget):
+    dl = ProtomapsDownloader()
+
+    with pytest.raises(
+        ValueError,
+        match="auto_zoom_tile_budget must be a positive integer",
+    ):
+        dl._select_zoom(
+            (0, 0, 1, 1),
+            "auto",
+            {"min_zoom": 0, "max_zoom": 15},
+            tile_budget=tile_budget,
+        )
+
+
+def test_protomaps_explicit_zoom_overrides_adaptive_selection():
+    dl = ProtomapsDownloader()
+    with patch.object(dl, "_tiles_for_bbox") as tiles_for_bbox:
+        zoom = dl._select_zoom(
+            (0, 0, 1, 1),
+            14,
+            {"min_zoom": 0, "max_zoom": 15},
+            tile_budget=16,
+        )
+
+    assert zoom == 14
+    tiles_for_bbox.assert_not_called()
+
+
+@pytest.mark.parametrize("zoom", [16, 18])
+def test_protomaps_rejects_zoom_above_archive_maximum(zoom):
+    dl = ProtomapsDownloader()
+
+    with pytest.raises(ValueError, match="outside archive range 0-15"):
+        dl._select_zoom(
+            (0, 0, 1, 1),
+            zoom,
+            {"min_zoom": 0, "max_zoom": 15},
+            tile_budget=16,
+        )
+
+
+def test_adjacent_zoom_15_tile_cores_remove_overlap_and_leave_repairable_seam():
+    dl = ProtomapsDownloader()
+    left_bounds = mercantile.LngLatBbox(west=0, south=0, east=1, north=1)
+    right_bounds = mercantile.LngLatBbox(west=1, south=0, east=2, north=1)
+    # These independently quantized buffered copies overlap in X. Their tile-core
+    # fragments differ by about 0.33 m along the shared boundary.
+    left_buffered = LineString([(0.8, 0), (1.2, 1)])
+    right_buffered = LineString([(0.8, 0.000003), (1.5, 1.750003)])
+
+    left = dl._clip_road_to_tile_core(left_buffered, left_bounds)
+    right = dl._clip_road_to_tile_core(right_buffered, right_bounds)
+
+    assert tuple(left.coords[-1]) == pytest.approx((1.0, 0.5))
+    assert tuple(right.coords[0]) == pytest.approx((1.0, 0.500003))
+    assert left.intersection(right).is_empty
+
+    projected = gpd.GeoSeries([left, right], crs="EPSG:4326").to_crs("EPSG:3857")
+    seam_distance = projected.iloc[0].boundary.geoms[-1].distance(
+        projected.iloc[1].boundary.geoms[0]
+    )
+    assert 0 < seam_distance < 0.5
+
+    normalized = normalize_protomaps_topology(
+        gpd.GeoDataFrame(geometry=projected, crs=projected.crs)
+    )
+    assert normalized.attrs["protomaps_topology"]["undershoots_repaired"] == 2
+    assert normalized.geometry.union_all().is_valid
+
+
+def test_protomaps_get_data_records_selected_fetch_metadata():
+    dl = ProtomapsDownloader()
+    tile = mercantile.Tile(x=1, y=2, z=14)
+    with (
+        patch('headless_sidewalkreator.planet_download.protomaps.Reader') as reader,
+        patch.object(dl, "_tiles_for_bbox", return_value=[tile]),
+    ):
+        reader.return_value.header.return_value = {
+            "min_zoom": 0,
+            "max_zoom": 15,
+            "tile_compression": None,
+        }
+        reader.return_value.get.return_value = None
+        gdf = dl.get_data(
+            (0, 0, 0.01, 0.01),
+            zoom=14,
+            tile_workers=1,
+            show_progress=False,
+        )
+
+    assert gdf.attrs == {
+        "provider": "protomaps",
+        "zoom": 14,
+        "tile_count": 1,
+        "tile_workers": 1,
+    }
+
+
+@pytest.mark.parametrize("worker_count", [0, -1, 1.5])
+def test_protomaps_rejects_invalid_worker_count(worker_count):
+    dl = ProtomapsDownloader()
+    tile = mercantile.Tile(x=1, y=2, z=14)
+    with (
+        patch('headless_sidewalkreator.planet_download.protomaps.Reader') as reader,
+        patch.object(dl, "_tiles_for_bbox", return_value=[tile]),
+    ):
+        reader.return_value.header.return_value = {
+            "min_zoom": 0,
+            "max_zoom": 15,
+            "tile_compression": None,
+        }
+        with pytest.raises(ValueError, match="tile_workers must be a positive integer"):
+            dl.get_data(
+                (0, 0, 0.01, 0.01),
+                zoom=14,
+                tile_workers=worker_count,
+                show_progress=False,
+            )
+
+
+@pytest.mark.parametrize("zoom", [16, 18])
+def test_unsupported_zoom_is_rejected_before_tile_execution(zoom):
+    dl = ProtomapsDownloader()
+    with patch(
+        'headless_sidewalkreator.planet_download.protomaps.Reader'
+    ) as reader:
+        reader.return_value.header.return_value = {
+            "min_zoom": 0,
+            "max_zoom": 15,
+            "tile_compression": None,
+        }
+        with pytest.raises(ValueError, match="outside archive range 0-15"):
+            dl.get_data(
+                (0, 0, 0.01, 0.01),
+                zoom=zoom,
+                show_progress=False,
+            )
+
+    reader.return_value.get.assert_not_called()
+
+
+def test_protomaps_defaults_to_at_most_eight_tile_workers():
+    dl = ProtomapsDownloader()
+    tiles = [mercantile.Tile(x=index, y=2, z=14) for index in range(10)]
+    with (
+        patch('headless_sidewalkreator.planet_download.protomaps.Reader') as reader,
+        patch.object(dl, "_tiles_for_bbox", return_value=tiles),
+    ):
+        reader.return_value.header.return_value = {
+            "min_zoom": 0,
+            "max_zoom": 15,
+            "tile_compression": None,
+        }
+        reader.return_value.get.return_value = None
+        gdf = dl.get_data(
+            (0, 0, 0.01, 0.01),
+            zoom=14,
+            show_progress=False,
+        )
+
+    assert gdf.attrs["tile_workers"] == 8
 
 @patch('requests.Session')
 def test_protomaps_get_data_mocked(mock_session):

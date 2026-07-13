@@ -17,6 +17,8 @@ from .generic_functions import (
     polygonize_lines_gdf,
     data_clean_gdf,
     split_lines_at_intersections,
+    normalize_protomaps_topology,
+    _validate_protomaps_topology_options,
     handle_sidewalk_tags,
     draw_sidewalks_gdf,
     remove_lines_from_no_block_gdf,
@@ -33,12 +35,12 @@ from .logging_config import get_logger
 logger = get_logger(__name__)
 
 
-def _run_timed_stage(label: str, show_progress: bool, func, *args, **kwargs):
-    if show_progress:
+def _run_timed_stage(label: str, progress_enabled: bool, func, *args, **kwargs):
+    if progress_enabled:
         print(f"   {label}...")
     start = time.perf_counter()
     result = func(*args, **kwargs)
-    if show_progress:
+    if progress_enabled:
         duration = time.perf_counter() - start
         print(f"   {label} complete in {duration:.2f} seconds.")
     return result
@@ -93,9 +95,23 @@ def _fetch_and_clip_osm(
     logger.info("Step 3 complete")
 
     # 4. Clip data
+    source_attrs = dict(osm_gdf.attrs)
     clipped_gdf = clip_gdf(osm_gdf, input_gdf)
+    clipped_gdf.attrs.update(source_attrs)
     logger.info("Step 4 complete")
     return clipped_gdf
+
+
+def _is_protomaps_source(gdf: gpd.GeoDataFrame, provider: str = None) -> bool:
+    """Detect Protomaps data without requiring serialized DataFrame metadata."""
+    if provider == "protomaps" or gdf.attrs.get("provider") == "protomaps":
+        return True
+    pmap_columns = [
+        column
+        for column in gdf.columns
+        if isinstance(column, str) and column.startswith("pmap:")
+    ]
+    return any(gdf[column].notna().any() for column in pmap_columns)
 
 
 def _preprocess_osm_data(
@@ -103,8 +119,26 @@ def _preprocess_osm_data(
     input_gdf: gpd.GeoDataFrame,
     default_widths: dict,
     fallback_default_width: float,
+    provider: str = None,
+    repair_protomaps_topology: bool = True,
+    protomaps_endpoint_snap_tolerance: float = 0.5,
+    protomaps_endpoint_snap_max_angle: float = 45.0,
+    show_progress: bool = False,
 ) -> tuple:
     """Reproject, clean, and split OSM lines at intersections."""
+    (
+        protomaps_endpoint_snap_tolerance,
+        protomaps_endpoint_snap_max_angle,
+    ) = _validate_protomaps_topology_options(
+        protomaps_endpoint_snap_tolerance,
+        protomaps_endpoint_snap_max_angle,
+    )
+
+    normalize_protomaps = repair_protomaps_topology and _is_protomaps_source(
+        clipped_gdf,
+        provider,
+    )
+
     # 5. Reproject to a local TM
     utm_crs = input_gdf.estimate_utm_crs()
     clipped_reproj_gdf = reproject_gdf(clipped_gdf, utm_crs)
@@ -124,7 +158,15 @@ def _preprocess_osm_data(
     ].copy()
     lines_gdf = linework_gdf.explode(index_parts=False, ignore_index=True)
     lines_gdf = lines_gdf[lines_gdf.geometry.type == "LineString"].copy()
-    splitted_gdf = split_lines_at_intersections(lines_gdf)
+    if normalize_protomaps:
+        splitted_gdf = normalize_protomaps_topology(
+            lines_gdf,
+            endpoint_snap_tolerance=protomaps_endpoint_snap_tolerance,
+            endpoint_snap_max_angle=protomaps_endpoint_snap_max_angle,
+            show_progress=show_progress,
+        )
+    else:
+        splitted_gdf = split_lines_at_intersections(lines_gdf)
     logger.info("Step 7 complete")
 
     return splitted_gdf, cleaned_gdf, clipped_reproj_gdf
@@ -361,6 +403,9 @@ def generate_protoblocks(
         "crossing_max_ray_iterations": params.crossing_max_ray_iterations,
         "crossing_node_precision": params.crossing_node_precision,
         "renode_before_polygonize": False,
+        "repair_protomaps_topology": params.repair_protomaps_topology,
+        "protomaps_endpoint_snap_tolerance": params.protomaps_endpoint_snap_tolerance,
+        "protomaps_endpoint_snap_max_angle": params.protomaps_endpoint_snap_max_angle,
         "show_progress": False,
     }
 
@@ -368,12 +413,29 @@ def generate_protoblocks(
         run_params.update(parameters)
 
     input_gdf = _resolve_input_area(place_name, input_polygon_gdf, bbox)
-    clipped_gdf = _fetch_and_clip_osm(input_gdf, osm_gdf, run_params["timeout"], provider=run_params.get("provider"), **run_params.get("provider_kwargs", {}))
+    provider_kwargs = dict(run_params.get("provider_kwargs", {}))
+    provider_kwargs.setdefault("show_progress", run_params["show_progress"])
+    clipped_gdf = _fetch_and_clip_osm(
+        input_gdf,
+        osm_gdf,
+        run_params["timeout"],
+        provider=run_params.get("provider"),
+        **provider_kwargs,
+    )
     splitted_gdf, _, _ = _preprocess_osm_data(
         clipped_gdf,
         input_gdf,
         run_params["default_widths"],
         run_params["fallback_default_width"],
+        provider=run_params.get("provider"),
+        repair_protomaps_topology=run_params["repair_protomaps_topology"],
+        protomaps_endpoint_snap_tolerance=run_params[
+            "protomaps_endpoint_snap_tolerance"
+        ],
+        protomaps_endpoint_snap_max_angle=run_params[
+            "protomaps_endpoint_snap_max_angle"
+        ],
+        show_progress=run_params["show_progress"],
     )
 
     protoblocks_gdf = _generate_protoblocks_from_splitted_lines(
@@ -449,6 +511,9 @@ def sidewalkreator(
         "crossing_max_ray_iterations": params.crossing_max_ray_iterations,
         "crossing_node_precision": params.crossing_node_precision,
         "renode_before_polygonize": False,
+        "repair_protomaps_topology": params.repair_protomaps_topology,
+        "protomaps_endpoint_snap_tolerance": params.protomaps_endpoint_snap_tolerance,
+        "protomaps_endpoint_snap_max_angle": params.protomaps_endpoint_snap_max_angle,
         "show_progress": False,
     }
 
@@ -465,6 +530,8 @@ def sidewalkreator(
         input_polygon_gdf,
         bbox,
     )
+    provider_kwargs = dict(run_params.get("provider_kwargs", {}))
+    provider_kwargs.setdefault("show_progress", show_progress)
     clipped_gdf = _run_timed_stage(
         "Steps 2-4: fetch and clip OSM data",
         show_progress,
@@ -473,7 +540,7 @@ def sidewalkreator(
         osm_gdf,
         run_params["timeout"],
         provider=run_params.get("provider"),
-        **run_params.get("provider_kwargs", {}),
+        **provider_kwargs,
     )
     splitted_gdf, cleaned_gdf, clipped_reproj_gdf = _run_timed_stage(
         "Steps 5-7: reproject, clean, and split lines",
@@ -483,7 +550,19 @@ def sidewalkreator(
         input_gdf,
         run_params["default_widths"],
         run_params["fallback_default_width"],
+        provider=run_params.get("provider"),
+        repair_protomaps_topology=run_params["repair_protomaps_topology"],
+        protomaps_endpoint_snap_tolerance=run_params[
+            "protomaps_endpoint_snap_tolerance"
+        ],
+        protomaps_endpoint_snap_max_angle=run_params[
+            "protomaps_endpoint_snap_max_angle"
+        ],
+        show_progress=show_progress,
     )
+    topology_stats = splitted_gdf.attrs.get("protomaps_topology")
+    if topology_stats is not None:
+        run_params["protomaps_topology_stats"] = topology_stats
 
     _run_timed_stage(
         "Debug: save split-line layer",

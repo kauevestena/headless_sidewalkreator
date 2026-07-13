@@ -8,6 +8,7 @@ transforming geospatial data using GeoPandas and other related libraries.
 import math
 import os
 import json
+import time
 import pandas as pd
 import geopandas as gpd
 from typing import Optional, List, Tuple
@@ -19,8 +20,10 @@ from shapely.geometry import (
     MultiPoint,
     Point,
     Polygon,
+    box,
 )
 from shapely.prepared import prep
+from shapely.strtree import STRtree
 
 from .logging_config import get_logger
 
@@ -414,7 +417,288 @@ def parse_tags(tags: str) -> dict:
     except Exception:
         return {}
 
-from shapely.ops import split, substring
+from shapely.ops import nearest_points, split, substring
+
+
+def _line_parts(geom) -> List[LineString]:
+    """Extract non-empty LineStrings from a Shapely geometry."""
+    if geom is None or geom.is_empty:
+        return []
+    if geom.geom_type == "LineString":
+        return [geom]
+    if geom.geom_type == "MultiLineString":
+        return [part for part in geom.geoms if not part.is_empty]
+    if geom.geom_type == "GeometryCollection":
+        parts = []
+        for part in geom.geoms:
+            parts.extend(_line_parts(part))
+        return parts
+    return []
+
+
+def _endpoint_neighbor_indexes(point, line_index, tree, lines) -> List[int]:
+    """Return other line indexes that intersect an endpoint exactly."""
+    neighbors = []
+    for candidate_index in tree.query(point):
+        candidate_index = int(candidate_index)
+        if candidate_index == line_index:
+            continue
+        if point.intersects(lines[candidate_index]):
+            neighbors.append(candidate_index)
+    return neighbors
+
+
+def _endpoint_connection_candidate(
+    endpoint,
+    inner_coord,
+    line_index,
+    tree,
+    lines,
+    tolerance,
+    max_angle,
+):
+    """Return the nearest directionally valid line connection for an endpoint."""
+    outward = (endpoint.x - inner_coord[0], endpoint.y - inner_coord[1])
+    outward_length = math.hypot(*outward)
+    if outward_length == 0:
+        return None, 0
+
+    query_geom = box(
+        endpoint.x - tolerance,
+        endpoint.y - tolerance,
+        endpoint.x + tolerance,
+        endpoint.y + tolerance,
+    )
+    eligible = []
+    rejected_count = 0
+    for candidate_index in tree.query(query_geom):
+        candidate_index = int(candidate_index)
+        if candidate_index == line_index:
+            continue
+        distance = endpoint.distance(lines[candidate_index])
+        if not 0 < distance <= tolerance:
+            continue
+
+        connection = nearest_points(endpoint, lines[candidate_index])[1]
+        connector = (connection.x - endpoint.x, connection.y - endpoint.y)
+        connector_length = math.hypot(*connector)
+        if connector_length == 0:
+            continue
+        cosine = (
+            outward[0] * connector[0] + outward[1] * connector[1]
+        ) / (outward_length * connector_length)
+        angle = math.degrees(math.acos(max(-1.0, min(1.0, cosine))))
+        if angle <= max_angle:
+            eligible.append((distance, candidate_index, connection))
+        else:
+            rejected_count += 1
+
+    if not eligible:
+        return None, rejected_count
+    return min(eligible, key=lambda candidate: candidate[:2]), rejected_count
+
+
+def _count_repairable_endpoint_gaps(lines, tolerance, max_angle) -> int:
+    """Count forward-facing disconnected endpoints within the repair tolerance."""
+    if not lines:
+        return 0
+    tree = STRtree(lines)
+    count = 0
+    for line_index, line in enumerate(lines):
+        coords = list(line.coords)
+        for endpoint_position, inner_position in ((0, 1), (-1, -2)):
+            endpoint = Point(coords[endpoint_position])
+            if _endpoint_neighbor_indexes(endpoint, line_index, tree, lines):
+                continue
+            candidate, _ = _endpoint_connection_candidate(
+                endpoint,
+                coords[inner_position],
+                line_index,
+                tree,
+                lines,
+                tolerance,
+                max_angle,
+            )
+            if candidate is not None:
+                count += 1
+    return count
+
+
+def _validate_protomaps_topology_options(tolerance, max_angle) -> Tuple[float, float]:
+    """Validate and normalize Protomaps topology controls."""
+    try:
+        tolerance = float(tolerance)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "protomaps_endpoint_snap_tolerance must be a finite "
+            "non-negative number"
+        ) from exc
+    if not math.isfinite(tolerance) or tolerance < 0:
+        raise ValueError(
+            "protomaps_endpoint_snap_tolerance must be a finite "
+            "non-negative number"
+        )
+
+    try:
+        max_angle = float(max_angle)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "protomaps_endpoint_snap_max_angle must be a finite number "
+            "between 0 and 180"
+        ) from exc
+    if not math.isfinite(max_angle) or not 0 <= max_angle <= 180:
+        raise ValueError(
+            "protomaps_endpoint_snap_max_angle must be a finite number "
+            "between 0 and 180"
+        )
+    return tolerance, max_angle
+
+
+def normalize_protomaps_topology(
+    gdf: gpd.GeoDataFrame,
+    endpoint_snap_tolerance: float = 0.5,
+    endpoint_snap_max_angle: float = 45.0,
+    show_progress: bool = False,
+) -> gpd.GeoDataFrame:
+    """Node Protomaps roads and repair sub-metre topology defects."""
+    endpoint_snap_tolerance, endpoint_snap_max_angle = (
+        _validate_protomaps_topology_options(
+            endpoint_snap_tolerance,
+            endpoint_snap_max_angle,
+        )
+    )
+
+    stats = {
+        "duration_s": 0.0,
+        "undershoots_repaired": 0,
+        "overshoots_removed": 0,
+        "rejected_candidates": 0,
+        "max_gap_m": 0.0,
+        "remaining_eligible_endpoints": None,
+    }
+    source_attrs = dict(gdf.attrs)
+    started = time.perf_counter()
+    if show_progress:
+        print("   Noding Protomaps road topology...")
+    noded_gdf = split_lines_at_intersections(gdf)
+    lines = [
+        geom
+        for geom in noded_gdf.geometry
+        if geom is not None and not geom.is_empty and geom.geom_type == "LineString"
+    ]
+    if not lines or endpoint_snap_tolerance == 0:
+        stats["duration_s"] = time.perf_counter() - started
+        result = noded_gdf.copy()
+        result.attrs.update(source_attrs)
+        result.attrs["protomaps_topology"] = stats
+        return result
+
+    # First discard short one-ended tails created when independently quantized
+    # MVT features overshoot an otherwise valid intersection.
+    tree = STRtree(lines)
+    remove_indexes = set()
+    short_line_indexes = [
+        index
+        for index, line in enumerate(lines)
+        if line.length <= endpoint_snap_tolerance
+    ]
+    short_iter = _maybe_tqdm(
+        short_line_indexes,
+        show_progress,
+        desc="Removing Protomaps overshoots",
+        unit="segment",
+    )
+    for line_index in short_iter:
+        line = lines[line_index]
+        start = Point(line.coords[0])
+        end = Point(line.coords[-1])
+        start_connected = bool(
+            _endpoint_neighbor_indexes(start, line_index, tree, lines)
+        )
+        end_connected = bool(
+            _endpoint_neighbor_indexes(end, line_index, tree, lines)
+        )
+        if start_connected != end_connected:
+            remove_indexes.add(line_index)
+
+    if remove_indexes:
+        lines = [
+            line for index, line in enumerate(lines) if index not in remove_indexes
+        ]
+    stats["overshoots_removed"] = len(remove_indexes)
+
+    tree = STRtree(lines)
+    repaired_lines = []
+    line_iter = _maybe_tqdm(
+        range(len(lines)),
+        show_progress,
+        desc="Repairing Protomaps endpoint gaps",
+        unit="line",
+    )
+    for line_index in line_iter:
+        line = lines[line_index]
+        coords = list(line.coords)
+        endpoint_specs = ((0, 1), (-1, -2))
+        for endpoint_position, inner_position in endpoint_specs:
+            endpoint = Point(coords[endpoint_position])
+            if _endpoint_neighbor_indexes(endpoint, line_index, tree, lines):
+                continue
+
+            candidate, rejected_count = _endpoint_connection_candidate(
+                endpoint,
+                coords[inner_position],
+                line_index,
+                tree,
+                lines,
+                endpoint_snap_tolerance,
+                endpoint_snap_max_angle,
+            )
+            stats["rejected_candidates"] += rejected_count
+            if candidate is None:
+                continue
+
+            distance, _, connection = candidate
+            connection_coord = tuple(connection.coords[0])
+            if endpoint_position == 0:
+                coords.insert(0, connection_coord)
+            else:
+                coords.append(connection_coord)
+            stats["undershoots_repaired"] += 1
+            stats["max_gap_m"] = max(stats["max_gap_m"], float(distance))
+
+        repaired_lines.append(LineString(coords))
+
+    if stats["undershoots_repaired"] or stats["overshoots_removed"]:
+        merged = shapely.union_all(repaired_lines, grid_size=1e-4)
+        repaired_lines = _line_parts(merged)
+
+    if show_progress:
+        stats["remaining_eligible_endpoints"] = _count_repairable_endpoint_gaps(
+            repaired_lines,
+            endpoint_snap_tolerance,
+            endpoint_snap_max_angle,
+        )
+
+    stats["duration_s"] = time.perf_counter() - started
+    result = gpd.GeoDataFrame(geometry=repaired_lines, crs=noded_gdf.crs)
+    result.attrs.update(source_attrs)
+    result.attrs["protomaps_topology"] = stats
+    logger.info(
+        "Protomaps topology normalized in %.3fs: %s undershoots repaired, "
+        "%s overshoots removed, %s candidates rejected",
+        stats["duration_s"],
+        stats["undershoots_repaired"],
+        stats["overshoots_removed"],
+        stats["rejected_candidates"],
+    )
+    if show_progress:
+        print(
+            "   Protomaps topology: "
+            f"{stats['undershoots_repaired']} undershoots repaired, "
+            f"{stats['overshoots_removed']} overshoots removed in "
+            f"{stats['duration_s']:.2f} seconds."
+        )
+    return result
 
 
 def split_lines_at_intersections(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
@@ -440,26 +724,9 @@ def split_lines_at_intersections(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     gdf.geometry = set_precision(gdf.geometry, 1e-4)
     merged = gdf.geometry.union_all()
 
-    # Extract the resulting LineStrings
-    new_lines = []
-    if merged.geom_type == 'LineString':
-        new_lines.append(merged)
-    elif merged.geom_type == 'MultiLineString':
-        new_lines.extend(list(merged.geoms))
-    elif merged.geom_type == 'GeometryCollection':
-        for geom in merged.geoms:
-            if geom.geom_type == 'LineString':
-                new_lines.append(geom)
-            elif geom.geom_type == 'MultiLineString':
-                new_lines.extend(list(geom.geoms))
-
-    # Optional: we could drop empty lines or do additional cleanup, but union_all
-    # generally produces a clean set of LineStrings.
-    new_lines = [geom for geom in new_lines if not geom.is_empty]
-    return gpd.GeoDataFrame(geometry=new_lines, crs=gdf.crs)
-
-
-from shapely.ops import nearest_points
+    result = gpd.GeoDataFrame(geometry=_line_parts(merged), crs=gdf.crs)
+    result.attrs.update(gdf.attrs)
+    return result
 
 
 def adjust_buffer_for_buildings(

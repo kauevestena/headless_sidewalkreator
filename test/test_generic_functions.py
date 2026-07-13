@@ -5,12 +5,14 @@ import geopandas as gpd
 
 
 
+from shapely import wkt
 from shapely.geometry import LineString, Polygon, Point
 from unittest.mock import patch, MagicMock
 
 from headless_sidewalkreator.generic_functions import (
     fetch_street_network_for_bbox,
     polygonize_lines_gdf,
+    normalize_protomaps_topology,
     split_lines_at_intersections,
     remove_lines_from_no_block_gdf,
     filter_and_buffer_protoblocks_gdf,
@@ -65,6 +67,120 @@ def test_split_lines_at_intersections_multipoint():
 
     splitted_gdf = split_lines_at_intersections(gdf)
     assert len(splitted_gdf) > 4 # The exact number is hard to predict, but it should be more than 4
+
+
+def test_protomaps_topology_normalization_repairs_multiple_gap_types():
+    outer = LineString([(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)])
+    first_divider = LineString([(3, 0.2), (3, 10.2)])
+    second_divider = LineString([(7, 0.49), (7, 10)])
+    parallel_dead_end = LineString([(0.2, 2), (0.2, 5)])
+    gdf = gpd.GeoDataFrame(
+        geometry=[outer, first_divider, second_divider, parallel_dead_end],
+        crs="EPSG:3857",
+    )
+
+    normalized = normalize_protomaps_topology(
+        gdf,
+        endpoint_snap_tolerance=0.5,
+        endpoint_snap_max_angle=45,
+    )
+    polygons = polygonize_lines_gdf(normalized, node_lines=False)
+    stats = normalized.attrs["protomaps_topology"]
+
+    assert len(polygons) == 3
+    assert stats["undershoots_repaired"] == 2
+    assert stats["overshoots_removed"] == 1
+    assert stats["rejected_candidates"] >= 1
+    assert stats["max_gap_m"] == pytest.approx(0.49, abs=1e-3)
+    assert normalized.geometry.union_all().covers(parallel_dead_end)
+
+
+def test_protomaps_topology_uses_nearest_directionally_valid_target():
+    source = LineString([(0, 0), (5, 0)])
+    nearer_parallel = LineString([(5.2, -1), (5.2, 1)])
+    valid_target = LineString([(5.4, -1), (5.4, 1)])
+    gdf = gpd.GeoDataFrame(
+        geometry=[source, nearer_parallel, valid_target],
+        crs="EPSG:3857",
+    )
+
+    normalized = normalize_protomaps_topology(
+        gdf,
+        endpoint_snap_tolerance=0.5,
+        endpoint_snap_max_angle=45,
+    )
+    stats = normalized.attrs["protomaps_topology"]
+
+    assert stats["undershoots_repaired"] == 1
+    assert stats["rejected_candidates"] >= 1
+    assert normalized.geometry.union_all().covers(Point(5.4, 0))
+
+
+def test_generic_line_splitting_does_not_apply_protomaps_repairs():
+    outer = LineString([(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)])
+    divider = LineString([(5, 0.2), (5, 10)])
+    gdf = gpd.GeoDataFrame(geometry=[outer, divider], crs="EPSG:3857")
+
+    split_gdf = split_lines_at_intersections(gdf)
+    polygons = polygonize_lines_gdf(split_gdf, node_lines=False)
+
+    assert len(polygons) == 1
+    assert "protomaps_topology" not in split_gdf.attrs
+
+
+def test_travessa_luiz_gama_regression_splits_containing_protoblock():
+    protoblock = wkt.loads(
+        "Polygon ((-49.29168395990244989 -25.43343018909560271, "
+        "-49.29284426705368105 -25.43388891806587893, "
+        "-49.2932366958098882 -25.43310646593032587, "
+        "-49.29229057382286072 -25.43273434283050705, "
+        "-49.29206667160026711 -25.43264627848542148, "
+        "-49.29168395990244989 -25.43343018909560271))"
+    )
+    divider = wkt.loads(
+        "MultiLineString ((-49.29218888282775879 -25.43362915740602048, "
+        "-49.29219961166381836 -25.4332900404582638, "
+        "-49.29229080677032471 -25.43273291975838291))"
+    )
+    projected = gpd.GeoSeries(
+        [protoblock.boundary, divider],
+        crs="EPSG:4326",
+    ).to_crs("EPSG:32722")
+    gdf = gpd.GeoDataFrame(geometry=projected, crs=projected.crs)
+
+    normalized = normalize_protomaps_topology(gdf)
+    polygons = polygonize_lines_gdf(normalized, node_lines=False)
+
+    assert len(polygons) == 2
+    assert sorted(polygons.area) == pytest.approx([3658.84, 8493.66], abs=1.0)
+
+
+@pytest.mark.parametrize(
+    ("tolerance", "max_angle", "message"),
+    [
+        (-0.1, 45, "tolerance must be a finite non-negative number"),
+        (float("nan"), 45, "tolerance must be a finite non-negative number"),
+        (0.5, -1, "angle must be a finite number between 0 and 180"),
+        (0.5, 181, "angle must be a finite number between 0 and 180"),
+        (0.5, None, "angle must be a finite number between 0 and 180"),
+    ],
+)
+def test_protomaps_topology_normalization_validates_parameters(
+    tolerance,
+    max_angle,
+    message,
+):
+    gdf = gpd.GeoDataFrame(
+        geometry=[LineString([(0, 0), (1, 0)])],
+        crs="EPSG:3857",
+    )
+
+    with pytest.raises(ValueError, match=message):
+        normalize_protomaps_topology(
+            gdf,
+            endpoint_snap_tolerance=tolerance,
+            endpoint_snap_max_angle=max_angle,
+        )
 
 @patch('headless_sidewalkreator.generic_functions.ox')
 def test_remove_lines_from_no_block_gdf_osmnx_path(mock_ox):
