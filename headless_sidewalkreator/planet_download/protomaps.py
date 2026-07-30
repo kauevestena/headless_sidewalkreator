@@ -36,6 +36,11 @@ class ProtomapsDownloader(PlanetDownloader):
 
     def __init__(self, url: str = None):
         self.url = url or "https://data.source.coop/protomaps/openstreetmap/tiles/v3.pmtiles"
+        from .base import is_safe_url
+        if not is_safe_url(self.url):
+            raise ValueError(
+                f"Insecure Protomaps URL: '{self.url}'. Only allowed remote HTTP(S) domains are permitted."
+            )
 
     @property
     def provider_name(self) -> str:
