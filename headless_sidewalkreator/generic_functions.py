@@ -287,6 +287,12 @@ import json
 import re
 import pandas as pd
 
+# Pre-compile regex for HSTORE-like tags parsing to avoid ReDoS and improve performance.
+# This uses an "unrolled loop" pattern to efficiently handle backslash-escaped quotes.
+HSTORE_PATTERN = re.compile(
+    r'"([^"\\]*(?:\\.[^"\\]*)*)"\s*=>\s*"([^"\\]*(?:\\.[^"\\]*)*)"'
+)
+
 from shapely.ops import split, substring
 from shapely.geometry import MultiPoint, Point
 
@@ -2016,9 +2022,8 @@ def data_clean_gdf(
         # 2. Try HSTORE-like format: "key"=>"value", "key2"=>"value2"
         d = {}
         try:
-            # This regex matches "key"=>"value" pairs, handles backslash-escaped quotes
-            pattern = r'"((?:\\.|[^"\\])*)"\s*=>\s*"((?:\\.|[^"\\])*)"'
-            for match in re.finditer(pattern, tags):
+            # Uses pre-compiled unrolled-loop regex for security and performance
+            for match in HSTORE_PATTERN.finditer(tags):
                 key = match.group(1).replace('\\"', '"').replace('\\\\', '\\')
                 value = match.group(2).replace('\\"', '"').replace('\\\\', '\\')
                 d[key] = value
