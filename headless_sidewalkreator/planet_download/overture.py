@@ -6,7 +6,7 @@ import pandas as pd
 from shapely import wkb
 import json
 
-from .base import PlanetDownloader
+from .base import PlanetDownloader, is_safe_url, is_safe_release
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +19,15 @@ class OvertureDownloader(PlanetDownloader):
     def __init__(self, release: str = None, base_url: str = None):
         self.release = release or self.DEFAULT_RELEASE
         self.base_url = base_url or self.DEFAULT_BASE_URL
+
+        if not is_safe_release(self.release):
+            raise ValueError(
+                f"Invalid Overture release: '{self.release}'. Only alphanumeric, dot, dash, and underscores are allowed."
+            )
+        if not is_safe_url(self.base_url):
+            raise ValueError(
+                f"Insecure Overture base URL: '{self.base_url}'. Only allowed remote HTTP(S) domains are permitted."
+            )
         self._con = None
 
     @property
@@ -53,6 +62,8 @@ class OvertureDownloader(PlanetDownloader):
         # If buildings are needed, we'd need another query.
 
         url = f"{self.base_url}/{self.release}/theme=transportation/type=segment/*"
+        if not is_safe_url(url):
+            raise ValueError(f"Insecure URL constructed for Overture data: {url}")
 
         query = f"""
         SELECT
@@ -100,12 +111,16 @@ class OvertureDownloader(PlanetDownloader):
             return gdf
 
         except Exception as e:
+            if isinstance(e, ValueError):
+                raise
             logger.error(f"Error fetching Overture data: {e}")
             return gpd.GeoDataFrame(columns=['geometry'], crs="EPSG:4326")
 
     def _get_buildings(self, bbox: Tuple[float, float, float, float]) -> gpd.GeoDataFrame:
         minx, miny, maxx, maxy = bbox
         url = f"{self.base_url}/{self.release}/theme=buildings/type=building/*"
+        if not is_safe_url(url):
+            raise ValueError(f"Insecure URL constructed for Overture buildings: {url}")
 
         query = f"""
         SELECT
@@ -133,5 +148,7 @@ class OvertureDownloader(PlanetDownloader):
 
             return gpd.GeoDataFrame(df, geometry='geometry', crs="EPSG:4326")
         except Exception as e:
+            if isinstance(e, ValueError):
+                raise
             logger.warning(f"Error fetching Overture buildings: {e}")
             return gpd.GeoDataFrame(columns=['geometry'], crs="EPSG:4326")
