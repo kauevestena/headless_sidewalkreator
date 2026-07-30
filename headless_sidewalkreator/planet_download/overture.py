@@ -65,16 +65,16 @@ class OvertureDownloader(PlanetDownloader):
         FROM
             read_parquet('{url}', filename=true, hive_partitioning=1)
         WHERE
-            bbox.xmin >= {minx} AND bbox.xmax <= {maxx}
-            AND bbox.ymin >= {miny} AND bbox.ymax <= {maxy}
+            bbox.xmin >= ? AND bbox.xmax <= ?
+            AND bbox.ymin >= ? AND bbox.ymax <= ?
         """
 
         con = self._get_con()
         logger.info(f"Querying Overture Transportation at {bbox}")
 
         try:
-            # Execute and convert to pandas
-            df = con.execute(query).df()
+            # Execute with parameterized bbox coordinates and convert to pandas
+            df = con.execute(query, [minx, maxx, miny, maxy]).df()
 
             if df.empty:
                 logger.warning("No Overture data found for the given bbox")
@@ -115,15 +115,15 @@ class OvertureDownloader(PlanetDownloader):
         FROM
             read_parquet('{url}', filename=true, hive_partitioning=1)
         WHERE
-            bbox.xmin >= {minx} AND bbox.xmax <= {maxx}
-            AND bbox.ymin >= {miny} AND bbox.ymax <= {maxy}
+            bbox.xmin >= ? AND bbox.xmax <= ?
+            AND bbox.ymin >= ? AND bbox.ymax <= ?
         """
 
         con = self._get_con()
         logger.info(f"Querying Overture Buildings at {bbox}")
 
         try:
-            df = con.execute(query).df()
+            df = con.execute(query, [minx, maxx, miny, maxy]).df()
             if df.empty:
                 return gpd.GeoDataFrame(columns=['geometry'], crs="EPSG:4326")
 
