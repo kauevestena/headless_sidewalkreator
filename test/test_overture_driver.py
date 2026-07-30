@@ -47,9 +47,38 @@ def test_overture_get_data_mocked(mock_connect):
     mock_con.execute.return_value.df.side_effect = [trans_df, build_df]
 
     dl = OvertureDownloader()
-    gdf = dl.get_data((0, 0, 1, 1))
+    gdf = dl.get_data((0, 1, 2, 3))
 
     assert len(gdf) == 2
     assert 'highway' in gdf.columns
     assert 'building' in gdf.columns
     assert gdf.crs == "EPSG:4326"
+
+    # Verify that con.execute was called with parameterized values
+    # Filter only execution calls that are parameterized (i.e. have parameter list of length 4)
+    param_calls = [
+        call for call in mock_con.execute.call_args_list
+        if len(call[0]) > 1 and isinstance(call[0][1], list) and len(call[0][1]) == 4
+    ]
+
+    assert len(param_calls) == 2
+
+    # First call: transportation query
+    call_1_args, call_1_kwargs = param_calls[0]
+    query_1 = call_1_args[0]
+    params_1 = call_1_args[1]
+    assert "bbox.xmin >= ?" in query_1
+    assert "bbox.xmax <= ?" in query_1
+    assert "bbox.ymin >= ?" in query_1
+    assert "bbox.ymax <= ?" in query_1
+    assert params_1 == [0, 2, 1, 3] # minx, maxx, miny, maxy
+
+    # Second call: buildings query
+    call_2_args, call_2_kwargs = param_calls[1]
+    query_2 = call_2_args[0]
+    params_2 = call_2_args[1]
+    assert "bbox.xmin >= ?" in query_2
+    assert "bbox.xmax <= ?" in query_2
+    assert "bbox.ymin >= ?" in query_2
+    assert "bbox.ymax <= ?" in query_2
+    assert params_2 == [0, 2, 1, 3] # minx, maxx, miny, maxy
