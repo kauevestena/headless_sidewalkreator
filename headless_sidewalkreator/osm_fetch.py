@@ -125,6 +125,7 @@ def get_osm_data(
 
         attempt = 0
         last_exc = None
+        sleep_fn = kwargs.get("sleep_fn", time.sleep)
         while attempt <= max_retries:
             try:
                 result = fetch_func((west, south, east, north), tags)
@@ -157,7 +158,7 @@ def get_osm_data(
                 logger.warning("Fetch failed on attempt %d: %s", attempt + 1, exc)
                 attempt += 1
                 if attempt <= max_retries:
-                    time.sleep(min(2**attempt, 10))
+                    sleep_fn(min(2**attempt, 10))
 
         logger.error("Failed to fetch OSM data after %d attempts: %s", max_retries + 1, last_exc)
         return gpd.GeoDataFrame(columns=["geometry"])

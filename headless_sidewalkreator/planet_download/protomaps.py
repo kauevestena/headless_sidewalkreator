@@ -210,6 +210,7 @@ class ProtomapsDownloader(PlanetDownloader):
         request_timeout = kwargs.get('timeout', 60)
         max_retries = kwargs.get('max_retries', 2)
         show_progress = kwargs.get('show_progress', True)
+        sleep_fn = kwargs.get('sleep_fn', time.sleep)
 
         all_features = []
         thread_state = local()
@@ -256,7 +257,7 @@ class ProtomapsDownloader(PlanetDownloader):
                 except requests.RequestException as exc:
                     last_exc = exc
                     if attempt < max_retries:
-                        time.sleep(min(2 ** attempt, 5))
+                        sleep_fn(min(2 ** attempt, 5))
 
             raise last_exc
 
