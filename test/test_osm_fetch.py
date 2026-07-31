@@ -146,3 +146,21 @@ def test_get_osm_data_max_retries_exceeded(mock_sleep, mock_ox, caplog):
 
         # Check that the appropriate error was logged
         assert "Failed to fetch OSM data after 3 attempts" in caplog.text
+
+
+def test_get_osm_data_custom_sleep_fn(mock_ox):
+    """Test that a custom sleep_fn is used instead of time.sleep during retries."""
+    mock_ox.features_from_bbox.side_effect = Exception("Failed")
+
+    sleep_calls = []
+    def custom_sleep(seconds):
+        sleep_calls.append(seconds)
+
+    with patch('headless_sidewalkreator.osm_fetch.ox', mock_ox):
+        # We perform a fetch that will fail and retry twice, using our custom sleep function
+        _ = get_osm_data((0, 0, 1, 1), max_retries=2, sleep_fn=custom_sleep)
+
+        # Check that the custom sleep function was called instead of time.sleep
+        assert len(sleep_calls) == 2
+        # Backoff intervals: 2^1 = 2 seconds, 2^2 = 4 seconds
+        assert sleep_calls == [2.0, 4.0]
