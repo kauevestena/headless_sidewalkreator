@@ -163,21 +163,11 @@ class TestGridSidewalkGeneration:
         crossings = result['crossings']
         kerbs = result['kerbs']
         
-        # Basic assertions - results should not be empty
+        # The grid produces a sidewalk block, but the GUI does not fabricate
+        # crossings where both sidewalk-axis intersections cannot be found.
         assert not sidewalks.empty, "Sidewalks should be generated for 1x1 grid"
-        assert not crossings.empty, "Crossings should be generated for 1x1 grid"
-        assert not kerbs.empty, "Kerbs should be generated for 1x1 grid"
-        
-        # For 1x1 grid, we expect some crossings according to the new topology generation
-        # which correctly nodes and closes the bounding box area.
-        print(f"1x1 Grid - Actual crossings: {len(crossings)}")
-        
-        # Test kerb relationship: kerb points = 2 * crossings  
-        expected_kerbs = 2 * len(crossings)
-        print(f"1x1 Grid - Expected kerbs: {expected_kerbs}, Actual: {len(kerbs)}")
-        
-        # Allow some tolerance since the algorithm might create different results
-        # due to edge cases in the 1x1 case
+        assert crossings.empty
+        assert kerbs.empty
         
     def test_grid_2x2_sidewalk_generation(self):
         """Test sidewalk generation for 2x2 grid - validates the mathematical relationships."""

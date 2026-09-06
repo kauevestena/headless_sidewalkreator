@@ -49,6 +49,15 @@ d_to_add_interp_d = 2
 # percent of middle-crossing segment to draw Kerbs
 perc_draw_kerbs = 30
 
+# GUI default: do not generate crossings from road segments shorter than 20 m.
+min_crossing_segment_length = 20.0
+
+# GUI eligibility check buffers each crossing center by 1 m.
+crossing_center_buffer_distance = 1.0
+
+# GUI default: crossings run parallel to the selected transversal street.
+crossing_direction_mode = "parallel"
+
 # crossing inward offset (meters) applied after width/curve_radius heuristic
 crossing_inward_offset = 1.0
 
