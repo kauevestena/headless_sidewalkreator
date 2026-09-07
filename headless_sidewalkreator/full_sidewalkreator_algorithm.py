@@ -7,6 +7,7 @@ import time
 
 import geopandas as gpd
 import osmnx as ox
+import pandas as pd
 from shapely.geometry import Polygon
 from tqdm import tqdm
 from .generic_functions import (
@@ -20,7 +21,6 @@ from .generic_functions import (
     split_lines_at_intersections,
     normalize_protomaps_topology,
     _validate_protomaps_topology_options,
-    handle_sidewalk_tags,
     draw_sidewalks_gdf,
     remove_lines_from_no_block_gdf,
     draw_crossings_gdf,
@@ -243,9 +243,13 @@ def _extract_poi_data(
 ) -> tuple:
     """Extract POIs (buildings, addresses, amenities, shops) from OSM data."""
     # 9. Extract POI data (buildings, addresses, other POIs)
-    buildings_gdf = cleaned_gdf[
-        (cleaned_gdf["building"].notna()) & (cleaned_gdf["building"] != "")
-    ].copy()
+    if "building" in cleaned_gdf.columns:
+        buildings_gdf = cleaned_gdf[
+            cleaned_gdf["building"].notna()
+            & (cleaned_gdf["building"] != "")
+        ].copy()
+    else:
+        buildings_gdf = cleaned_gdf.iloc[0:0].copy()
 
     # Extract address nodes
     if "addr:housenumber" in clipped_reproj_gdf.columns:
@@ -256,9 +260,11 @@ def _extract_poi_data(
         addresses_gdf = gpd.GeoDataFrame(geometry=[], crs=clipped_reproj_gdf.crs)
 
     # Extract other POIs (amenities and shops)
-    other_pois_gdf = clipped_reproj_gdf[
-        clipped_reproj_gdf["amenity"].notna() | clipped_reproj_gdf["shop"].notna()
-    ].copy()
+    other_poi_mask = pd.Series(False, index=clipped_reproj_gdf.index)
+    for column in ("amenity", "shop"):
+        if column in clipped_reproj_gdf.columns:
+            other_poi_mask |= clipped_reproj_gdf[column].notna()
+    other_pois_gdf = clipped_reproj_gdf[other_poi_mask].copy()
 
     # Create unified POI layer for sidewalk splitting
     poi_layers = []
@@ -302,8 +308,6 @@ def _draw_sidewalks(
         show_progress=run_params.get("show_progress", False),
     )
 
-    # Handle sidewalk tags
-    sidewalks_gdf = handle_sidewalk_tags(sidewalks_gdf, cleaned_gdf)
     logger.info("Step 10 complete")
     return sidewalks_gdf
 
@@ -351,6 +355,9 @@ def _generate_crossings(
         increment_inward=run_params["increment_inward"],
         max_crossings_iterations=run_params["max_crossings_iterations"],
         abs_max_crossing_len=run_params["abs_max_crossing_len"],
+        min_segment_length=run_params["min_crossing_segment_length"],
+        center_buffer_distance=run_params["crossing_center_buffer_distance"],
+        crossing_direction_mode=run_params["crossing_direction_mode"],
         perc_tol_crossings=run_params["perc_tol_crossings"],
         perc_draw_kerbs=run_params["perc_draw_kerbs"],
         ray_growth_factor=run_params["crossing_ray_growth_factor"],
@@ -533,6 +540,9 @@ def sidewalkreator(
         "split_num_segments": None,
         "min_d_to_building": params.min_d_to_building,
         "perc_draw_kerbs": params.perc_draw_kerbs,
+        "min_crossing_segment_length": params.min_crossing_segment_length,
+        "crossing_center_buffer_distance": params.crossing_center_buffer_distance,
+        "crossing_direction_mode": params.crossing_direction_mode,
         "perc_tol_crossings": params.perc_tol_crossings,
         "increment_inward": params.increment_inward,
         "max_crossings_iterations": params.max_crossings_iterations,

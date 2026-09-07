@@ -154,6 +154,44 @@ With the virtual environment active and dependencies installed:
 pytest -q
 ```
 
+### QGIS GUI parity
+
+The original QGIS GUI implementation is the behavioral reference for this
+headless port.  The parity regressions in `test/test_qgis_gui_parity.py` cover
+the following rules:
+
+- positive sidewalk tags create diagnostic sure zones in QGIS but do not clip
+  unrelated generated sidewalks;
+- side-specific and negative sidewalk tags remove only the GUI-defined side;
+- a crossing is emitted only after both sidewalk-axis intersections are found;
+- road segments shorter than 20 metres are skipped by default, matching the
+  GUI control;
+- each candidate's 1 m center buffer must be contained by a generated
+  protoblock;
+- crossing rays are parallel to the smallest-angle incident street by default,
+  matching the GUI's selected radio option; and
+- the committed QGIS grid fixture yields 6 sidewalks, 14 crossings, and 28
+  kerbs from the headless pipeline.
+
+The segment-length, center-containment, and direction assumptions can be
+overridden explicitly:
+
+```python
+parameters = {
+    "min_crossing_segment_length": value_in_metres,
+    "crossing_center_buffer_distance": value_in_metres,
+    "crossing_direction_mode": "parallel",  # or "perpendicular"
+}
+```
+
+The parallel option is applied consistently at both endpoint orientations.
+The current GUI source appears to fall back to perpendicular at its `P0`
+branch because that call does not request an index from
+`point_forms_minor_angle_w2`. Consequently, the source-derived tests and the
+count fixture are sufficient to trigger a fresh parity run, but production
+acceptance still requires geometry-level comparison with a GUI export made
+from the same frozen OSM input.
+
 ## Editable install and quick run
 
 To install the package in editable/development mode:

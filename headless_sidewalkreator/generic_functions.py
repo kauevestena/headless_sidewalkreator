@@ -1147,61 +1147,112 @@ def adjust_buffer_for_buildings(
 
 
 def handle_sidewalk_tags(
-    sidewalks_gdf: gpd.GeoDataFrame, streets_gdf: gpd.GeoDataFrame
+    sidewalks_gdf: gpd.GeoDataFrame,
+    streets_gdf: gpd.GeoDataFrame,
+    added_width: float = 2.0,
 ) -> gpd.GeoDataFrame:
-    """Handles sidewalk tags to implement exclusion and sure zones.
+    """Apply the QGIS GUI's sidewalk-tag exclusion behavior.
 
-    This function processes `sidewalk` tags on streets to refine the generated
-    sidewalk geometries. It performs two main actions:
-    1.  **Exclusion Zones**: For tags like `sidewalk=no`, `sidewalk=left`, or
-        `sidewalk=right`, it removes the corresponding areas from the generated
-        sidewalks.
-    2.  **Sure Zones**: For tags like `sidewalk=yes` or `sidewalk=both`, it
-        creates "sure zones" where sidewalks are expected. If any sure zones
-        exist, the final output is constrained to the intersection of the
-        generated sidewalks and these zones.
+    The GUI creates both exclusion and sure zones, but only subtracts exclusion
+    zones from the generated sidewalk layer.  Sure zones are diagnostic layers;
+    they must never constrain unrelated generated sidewalks elsewhere in an AOI.
+    Side-specific tags follow the direction of the OSM way: positive single-
+    sided buffers are left of the line and negative buffers are right of it.
 
     Args:
         sidewalks_gdf: A GeoDataFrame of generated sidewalks.
-        streets_gdf: A GeoDataFrame of streets, potentially with a "sidewalk" column.
+        streets_gdf: Streets with any supported ``sidewalk*`` columns.
+        added_width: Total extra width used to place the sidewalk axes.
 
     Returns:
-        A new GeoDataFrame of sidewalks with exclusion and sure zones applied.
+        A new GeoDataFrame with GUI-compatible exclusion zones subtracted.
     """
-    if "sidewalk" not in streets_gdf.columns or sidewalks_gdf.empty:
+    tag_columns = {
+        "sidewalk",
+        "sidewalk:both",
+        "sidewalk:left",
+        "sidewalk:right",
+    }
+    if sidewalks_gdf.empty or not tag_columns.intersection(streets_gdf.columns):
         return sidewalks_gdf
 
     sidewalks_gdf = sidewalks_gdf.copy()
     exclusion_geometries = []
-    sure_geometries = []
 
-    # Handle sidewalk=no
-    no_sidewalk_streets = streets_gdf[streets_gdf["sidewalk"] == "no"]
-    if not no_sidewalk_streets.empty:
-        # Vectorized buffer: road_width/2 + 1.0
-        if "width" in no_sidewalk_streets.columns:
-            road_widths = pd.to_numeric(no_sidewalk_streets["width"], errors="coerce").fillna(6.0)
-        else:
-            road_widths = 6.0
-        buffer_distances = (road_widths / 2) + 1.0
-        exclusion_geometries.extend(
-            no_sidewalk_streets.geometry.buffer(buffer_distances)
+    def _tag_value(row, name: str) -> str:
+        value = row.get(name)
+        if value is None:
+            return ""
+        try:
+            if bool(pd.isna(value)):
+                return ""
+        except (TypeError, ValueError):
+            pass
+        return str(value).strip().lower()
+
+    def _width_value(row) -> float:
+        try:
+            value = float(row.get("width", 6.0))
+        except (TypeError, ValueError):
+            value = 6.0
+        if not np.isfinite(value) or value <= 0:
+            value = 6.0
+        return value
+
+    for _, street in streets_gdf.iterrows():
+        geometry = street.geometry
+        if geometry is None or geometry.is_empty:
+            continue
+
+        sidewalk = _tag_value(street, "sidewalk")
+        sidewalk_both = _tag_value(street, "sidewalk:both")
+        sidewalk_left = _tag_value(street, "sidewalk:left")
+        sidewalk_right = _tag_value(street, "sidewalk:right")
+        tag_buffer = (
+            (_width_value(street) + float(added_width) + 1.0) / 2.0
+        ) + 0.5
+
+        exclude_full = sidewalk == "no" or (
+            not sidewalk and sidewalk_both == "no"
         )
+        exclude_left = sidewalk == "right"
+        exclude_right = sidewalk == "left"
 
-    # Handle sidewalk=left/right
-    for side in ["left", "right"]:
-        side_streets = streets_gdf[streets_gdf["sidewalk"] == side]
-        if not side_streets.empty:
-            # Vectorized offset and buffer
-            if "width" in side_streets.columns:
-                road_widths = pd.to_numeric(side_streets["width"], errors="coerce").fillna(6.0)
-            else:
-                road_widths = 6.0
-            buffer_distances = road_widths / 2
-            offset_lines = side_streets.geometry.offset_curve(
-                buffer_distances if side == "left" else -buffer_distances, join_style=2
+        # The GUI gives the aggregate tags precedence over side-specific tags.
+        if not sidewalk and not sidewalk_both:
+            exclude_left = exclude_left or sidewalk_left == "no"
+            exclude_right = exclude_right or sidewalk_right == "no"
+
+        if exclude_full:
+            exclusion_geometries.append(
+                geometry.buffer(
+                    tag_buffer,
+                    quad_segs=5,
+                    cap_style="square",
+                    join_style="round",
+                )
             )
-            exclusion_geometries.extend(offset_lines.buffer(1.0))
+            continue
+        if exclude_left:
+            exclusion_geometries.append(
+                geometry.buffer(
+                    tag_buffer,
+                    quad_segs=5,
+                    cap_style="flat",
+                    join_style="round",
+                    single_sided=True,
+                )
+            )
+        if exclude_right:
+            exclusion_geometries.append(
+                geometry.buffer(
+                    -tag_buffer,
+                    quad_segs=5,
+                    cap_style="flat",
+                    join_style="round",
+                    single_sided=True,
+                )
+            )
 
     # Apply exclusion zones first
     if exclusion_geometries:
@@ -1209,23 +1260,6 @@ def handle_sidewalk_tags(
             exclusion_geometries, crs=streets_gdf.crs
         ).union_all()
         sidewalks_gdf["geometry"] = sidewalks_gdf.geometry.difference(exclusion_union)
-        sidewalks_gdf = sidewalks_gdf[~sidewalks_gdf.geometry.is_empty].copy()
-
-    # Handle sidewalk=yes/both (sure zones)
-    sure_streets = streets_gdf[streets_gdf["sidewalk"].isin(["yes", "both"])]
-    if not sure_streets.empty:
-        # Vectorized buffer: road_width/2 + 1.0
-        if "width" in sure_streets.columns:
-            road_widths = pd.to_numeric(sure_streets["width"], errors="coerce").fillna(6.0)
-        else:
-            road_widths = 6.0
-        buffer_distances = (road_widths / 2) + 1.0
-        sure_geometries.extend(sure_streets.geometry.buffer(buffer_distances).tolist())
-
-    # If sure zones exist, constrain sidewalks to them
-    if sure_geometries:
-        sure_union = gpd.GeoSeries(sure_geometries, crs=streets_gdf.crs).union_all()
-        sidewalks_gdf["geometry"] = sidewalks_gdf.geometry.intersection(sure_union)
         sidewalks_gdf = sidewalks_gdf[~sidewalks_gdf.geometry.is_empty].copy()
 
     return sidewalks_gdf
@@ -1493,6 +1527,9 @@ class _CrossingsGenerator:
         self.kerb_fraction = None
         self.distance_tol = None
         self.base_curve_radius = None
+        self.protoblocks_union = None
+        self.center_buffer_distance = None
+
     def _empty_result(self) -> gpd.GeoDataFrame:
         return gpd.GeoDataFrame(geometry=[], crs=self.crs)
 
@@ -1587,6 +1624,77 @@ class _CrossingsGenerator:
 
     def _perpendicular(self, vec: tuple[float, float]) -> tuple[float, float]:
         return (-vec[1], vec[0])
+
+    def _transversal_direction(
+        self,
+        node: dict,
+        current_segment_id,
+        current_direction: tuple[float, float],
+        segment_info: dict,
+    ) -> Optional[tuple[float, float]]:
+        """Return the incident direction making the smallest GUI angle."""
+        candidates = []
+        node_point = node["point"]
+        for other_id in sorted(node["segments"], key=repr):
+            if other_id == current_segment_id:
+                continue
+            other_line = segment_info[other_id]["geometry"]
+            projection = other_line.project(node_point)
+            span = max(min(other_line.length * 0.05, 1.0), 1e-3)
+            target_distances = []
+            if projection > self.distance_tol:
+                target_distances.append(max(0.0, projection - span))
+            if other_line.length - projection > self.distance_tol:
+                target_distances.append(min(other_line.length, projection + span))
+            for target_distance in target_distances:
+                target = other_line.interpolate(target_distance)
+                vector = (target.x - node_point.x, target.y - node_point.y)
+                norm = math.hypot(*vector)
+                if norm <= self.distance_tol:
+                    continue
+                direction = (vector[0] / norm, vector[1] / norm)
+                score = (
+                    direction[0] * current_direction[0]
+                    + direction[1] * current_direction[1]
+                )
+                candidates.append((score, direction))
+        if not candidates:
+            return None
+        return max(candidates, key=lambda candidate: candidate[0])[1]
+
+    def _transversal_width(
+        self,
+        node: dict,
+        current_segment_id,
+        current_width: float,
+        segment_info: dict,
+        tolerance: float = 0.5,
+    ) -> float:
+        """Match the GUI's width choice among other incident segments."""
+        other_widths = [
+            segment_info[other_id]["width"]
+            for other_id in node["segments"]
+            if other_id != current_segment_id
+            and not math.isclose(
+                current_width,
+                segment_info[other_id]["width"],
+                rel_tol=1e-9,
+                abs_tol=tolerance,
+            )
+        ]
+        return max(other_widths) if other_widths else current_width
+
+    def _center_is_eligible(self, center: Point) -> bool:
+        """Match the GUI's buffered crossing-center containment check."""
+        if self.protoblocks_union is None:
+            return True
+        if self.center_buffer_distance == 0:
+            return center.within(self.protoblocks_union)
+        center_region = center.buffer(
+            self.center_buffer_distance,
+            quad_segs=5,
+        )
+        return center_region.within(self.protoblocks_union)
 
     def _extract_hit(self, geom, origin: Point, tol: float = 1e-3) -> Optional[Point]:
         if geom.is_empty:
@@ -1902,8 +2010,9 @@ def _crossing_rays(
     inward_distances: np.ndarray,
     from_start: np.ndarray,
     ray_lengths: np.ndarray,
+    direction_vectors: Optional[np.ndarray] = None,
 ):
-    """Build centers, perpendiculars, and paired rays for crossing candidates."""
+    """Build centers, direction vectors, and paired rays for candidates."""
     selected_lines = lines[segment_indexes]
     selected_lengths = line_lengths[segment_indexes]
     along = np.where(
@@ -1913,36 +2022,151 @@ def _crossing_rays(
     )
     centers = shapely.line_interpolate_point(selected_lines, along)
 
-    spans = np.maximum(np.minimum(selected_lengths * 0.05, 1.0), 1e-3)
-    point_before = shapely.line_interpolate_point(
-        selected_lines,
-        np.maximum(along - spans, 0.0),
-    )
-    point_after = shapely.line_interpolate_point(
-        selected_lines,
-        np.minimum(along + spans, selected_lengths),
-    )
-    dx = shapely.get_x(point_after) - shapely.get_x(point_before)
-    dy = shapely.get_y(point_after) - shapely.get_y(point_before)
-    norms = np.hypot(dx, dy)
-    valid = np.isfinite(norms) & (norms > 0)
-    perpendicular_x = np.zeros(len(centers), dtype=float)
-    perpendicular_y = np.zeros(len(centers), dtype=float)
-    perpendicular_x[valid] = -dy[valid] / norms[valid]
-    perpendicular_y[valid] = dx[valid] / norms[valid]
+    if direction_vectors is None:
+        spans = np.maximum(np.minimum(selected_lengths * 0.05, 1.0), 1e-3)
+        point_before = shapely.line_interpolate_point(
+            selected_lines,
+            np.maximum(along - spans, 0.0),
+        )
+        point_after = shapely.line_interpolate_point(
+            selected_lines,
+            np.minimum(along + spans, selected_lengths),
+        )
+        dx = shapely.get_x(point_after) - shapely.get_x(point_before)
+        dy = shapely.get_y(point_after) - shapely.get_y(point_before)
+        norms = np.hypot(dx, dy)
+        valid = np.isfinite(norms) & (norms > 0)
+        direction_x = np.zeros(len(centers), dtype=float)
+        direction_y = np.zeros(len(centers), dtype=float)
+        direction_x[valid] = -dy[valid] / norms[valid]
+        direction_y[valid] = dx[valid] / norms[valid]
+    else:
+        direction_vectors = np.asarray(direction_vectors, dtype=float)
+        norms = np.hypot(direction_vectors[:, 0], direction_vectors[:, 1])
+        valid = np.isfinite(norms) & (norms > 0)
+        direction_x = np.zeros(len(centers), dtype=float)
+        direction_y = np.zeros(len(centers), dtype=float)
+        direction_x[valid] = direction_vectors[valid, 0] / norms[valid]
+        direction_y[valid] = direction_vectors[valid, 1] / norms[valid]
 
     center_x = shapely.get_x(centers)
     center_y = shapely.get_y(centers)
     ray_coordinates = np.empty((len(centers) * 2, 2, 2), dtype=float)
     ray_coordinates[0::2, 0, :] = np.column_stack((center_x, center_y))
     ray_coordinates[1::2, 0, :] = np.column_stack((center_x, center_y))
-    ray_coordinates[0::2, 1, 0] = center_x + perpendicular_x * ray_lengths
-    ray_coordinates[0::2, 1, 1] = center_y + perpendicular_y * ray_lengths
-    ray_coordinates[1::2, 1, 0] = center_x - perpendicular_x * ray_lengths
-    ray_coordinates[1::2, 1, 1] = center_y - perpendicular_y * ray_lengths
+    ray_coordinates[0::2, 1, 0] = center_x + direction_x * ray_lengths
+    ray_coordinates[0::2, 1, 1] = center_y + direction_y * ray_lengths
+    ray_coordinates[1::2, 1, 0] = center_x - direction_x * ray_lengths
+    ray_coordinates[1::2, 1, 1] = center_y - direction_y * ray_lengths
     rays = shapely.linestrings(ray_coordinates)
     origins = np.repeat(centers, 2)
-    return centers, perpendicular_x, perpendicular_y, rays, origins, valid
+    return centers, direction_x, direction_y, rays, origins, valid
+
+
+def _gui_parallel_crossing_directions(
+    lines: np.ndarray,
+    line_lengths: np.ndarray,
+    endpoint_coordinates: np.ndarray,
+    node_ids: np.ndarray,
+    endpoint_segment_indexes: np.ndarray,
+    candidate_endpoint_positions: np.ndarray,
+) -> np.ndarray:
+    """Choose the GUI's smallest-angle incident street at each endpoint."""
+    spans = np.maximum(np.minimum(line_lengths * 0.05, 1.0), 1e-3)
+    near_starts = shapely.line_interpolate_point(lines, spans)
+    near_ends = shapely.line_interpolate_point(lines, line_lengths - spans)
+    inner_coordinates = np.column_stack(
+        (
+            np.ravel(
+                np.column_stack(
+                    (shapely.get_x(near_starts), shapely.get_x(near_ends))
+                )
+            ),
+            np.ravel(
+                np.column_stack(
+                    (shapely.get_y(near_starts), shapely.get_y(near_ends))
+                )
+            ),
+        )
+    )
+    outward_vectors = inner_coordinates - endpoint_coordinates
+    norms = np.linalg.norm(outward_vectors, axis=1)
+    valid = np.isfinite(norms) & (norms > 0)
+    outward_vectors[valid] /= norms[valid, None]
+    outward_vectors[~valid] = 0.0
+
+    endpoints_by_node: dict[int, list[int]] = {}
+    for endpoint_position, node_id in enumerate(node_ids):
+        endpoints_by_node.setdefault(int(node_id), []).append(endpoint_position)
+
+    directions = np.zeros((len(candidate_endpoint_positions), 2), dtype=float)
+    for output_position, endpoint_position in enumerate(
+        candidate_endpoint_positions
+    ):
+        current_vector = outward_vectors[endpoint_position]
+        current_segment = endpoint_segment_indexes[endpoint_position]
+        alternatives = [
+            other_position
+            for other_position in endpoints_by_node[int(node_ids[endpoint_position])]
+            if endpoint_segment_indexes[other_position] != current_segment
+            and valid[other_position]
+        ]
+        if alternatives:
+            alternative_vectors = outward_vectors[alternatives]
+            # Maximizing the dot product minimizes the unsigned angle used by
+            # the GUI. Ties retain endpoint order for deterministic output.
+            best = int(np.argmax(alternative_vectors @ current_vector))
+            directions[output_position] = alternative_vectors[best]
+        else:
+            # The GUI falls back to perpendicular when parallel selection
+            # cannot produce a direction.
+            directions[output_position] = (
+                -current_vector[1],
+                current_vector[0],
+            )
+    return directions
+
+
+def _gui_transversal_widths(
+    widths: np.ndarray,
+    node_ids: np.ndarray,
+    endpoint_segment_indexes: np.ndarray,
+    candidate_endpoint_positions: np.ndarray,
+    tolerance: float = 0.5,
+) -> np.ndarray:
+    """Vector equivalent of the GUI's ``get_major_dif_signed`` helper."""
+    endpoints_by_node: dict[int, list[int]] = {}
+    for endpoint_position, node_id in enumerate(node_ids):
+        endpoints_by_node.setdefault(int(node_id), []).append(endpoint_position)
+
+    selected = np.empty(len(candidate_endpoint_positions), dtype=float)
+    for output_position, endpoint_position in enumerate(
+        candidate_endpoint_positions
+    ):
+        current_segment = endpoint_segment_indexes[endpoint_position]
+        current_width = widths[current_segment]
+        other_widths = np.asarray(
+            [
+                widths[endpoint_segment_indexes[other_position]]
+                for other_position in endpoints_by_node[int(node_ids[endpoint_position])]
+                if endpoint_segment_indexes[other_position] != current_segment
+            ],
+            dtype=float,
+        )
+        different_widths = other_widths[
+            ~np.isclose(
+                other_widths,
+                current_width,
+                rtol=1e-9,
+                atol=tolerance,
+            )
+        ]
+        selected[output_position] = (
+            np.max(different_widths)
+            if len(different_widths)
+            else current_width
+        )
+    return selected
 
 
 def _draw_crossings_noded(
@@ -1954,6 +2178,8 @@ def _draw_crossings_noded(
     increment_inward: float,
     max_crossings_iterations: int,
     abs_max_crossing_len: float,
+    min_segment_length: float,
+    crossing_direction_mode: str,
     perc_tol_crossings: float,
     show_progress: bool,
 ) -> gpd.GeoDataFrame:
@@ -2016,7 +2242,6 @@ def _draw_crossings_noded(
     )
     endpoint_segment_indexes = np.repeat(np.arange(len(lines)), 2)
     endpoint_from_start = np.tile(np.array([True, False]), len(lines))
-    endpoint_widths = widths[endpoint_segment_indexes]
     node_segment_pairs = np.unique(
         np.column_stack((node_ids, endpoint_segment_indexes)),
         axis=0,
@@ -2025,28 +2250,33 @@ def _draw_crossings_noded(
         node_segment_pairs[:, 0],
         minlength=int(node_ids.max()) + 1,
     )
-    node_major_widths = np.full(len(node_degrees), -np.inf, dtype=float)
-    np.maximum.at(node_major_widths, node_ids, endpoint_widths)
     progress.update(1)
 
     candidate_mask = node_degrees[node_ids] > 2
+    candidate_endpoint_positions = np.flatnonzero(candidate_mask)
     segment_indexes = endpoint_segment_indexes[candidate_mask]
     from_start = endpoint_from_start[candidate_mask]
     candidate_node_ids = node_ids[candidate_mask]
     candidate_degrees = node_degrees[candidate_node_ids]
     candidate_widths = widths[segment_indexes]
+    transversal_widths = _gui_transversal_widths(
+        widths,
+        node_ids,
+        endpoint_segment_indexes,
+        candidate_endpoint_positions,
+    )
     candidate_lengths = line_lengths[segment_indexes]
     base_lengths = candidate_widths + extra_length
     max_inward = np.minimum(candidate_lengths * 0.49, candidate_lengths * 0.99)
     inward_distances = np.minimum(
-        0.5 * node_major_widths[candidate_node_ids]
+        0.5 * transversal_widths
         + generator.base_curve_radius
         + inward_offset,
         max_inward,
     )
     valid_candidates = (
         (base_lengths > 0)
-        & (candidate_lengths > generator.distance_tol)
+        & (candidate_lengths >= max(0.0, min_segment_length))
         & (inward_distances > generator.distance_tol)
     )
     segment_indexes = segment_indexes[valid_candidates]
@@ -2057,21 +2287,66 @@ def _draw_crossings_noded(
     max_inward = max_inward[valid_candidates]
     inward_distances = inward_distances[valid_candidates]
     output_segment_ids = original_indexes[segment_indexes]
+    candidate_endpoint_positions = candidate_endpoint_positions[valid_candidates]
+    ray_directions = None
+    if crossing_direction_mode == "parallel":
+        ray_directions = _gui_parallel_crossing_directions(
+            lines,
+            line_lengths,
+            endpoint_coordinates,
+            node_ids,
+            endpoint_segment_indexes,
+            candidate_endpoint_positions,
+        )
     progress.update(1)
 
     if len(segment_indexes) == 0:
         progress.close()
         return generator._empty_result()
 
+    if generator.protoblocks_union is not None:
+        initial_centers, *_ = _crossing_rays(
+            lines,
+            segment_indexes,
+            line_lengths,
+            inward_distances,
+            from_start,
+            np.maximum(base_lengths, 0.5),
+            ray_directions,
+        )
+        center_regions = (
+            initial_centers
+            if generator.center_buffer_distance == 0
+            else shapely.buffer(
+                initial_centers,
+                generator.center_buffer_distance,
+                quad_segs=5,
+            )
+        )
+        eligible_centers = shapely.within(
+            center_regions,
+            generator.protoblocks_union,
+        )
+        segment_indexes = segment_indexes[eligible_centers]
+        from_start = from_start[eligible_centers]
+        candidate_degrees = candidate_degrees[eligible_centers]
+        candidate_widths = candidate_widths[eligible_centers]
+        base_lengths = base_lengths[eligible_centers]
+        max_inward = max_inward[eligible_centers]
+        inward_distances = inward_distances[eligible_centers]
+        output_segment_ids = output_segment_ids[eligible_centers]
+        if ray_directions is not None:
+            ray_directions = ray_directions[eligible_centers]
+
+        if len(segment_indexes) == 0:
+            progress.close()
+            return generator._empty_result()
+
     ray_lengths = np.maximum(base_lengths, 0.5)
     max_allowed = base_lengths * (1 + perc_tol_crossings / 100.0)
     point_a = np.full(len(segment_indexes), None, dtype=object)
     point_e = np.full(len(segment_indexes), None, dtype=object)
     accepted = np.zeros(len(segment_indexes), dtype=bool)
-    fallback = np.zeros(len(segment_indexes), dtype=bool)
-    last_centers = np.full(len(segment_indexes), None, dtype=object)
-    last_perpendicular_x = np.zeros(len(segment_indexes), dtype=float)
-    last_perpendicular_y = np.zeros(len(segment_indexes), dtype=float)
     active = np.ones(len(segment_indexes), dtype=bool)
 
     for _ in range(max(1, int(max_crossings_iterations))):
@@ -2080,17 +2355,19 @@ def _draw_crossings_noded(
             progress.update(1)
             continue
 
-        centers, perp_x, perp_y, rays, origins, tangent_valid = _crossing_rays(
+        centers, _, _, rays, origins, direction_valid = _crossing_rays(
             lines,
             segment_indexes[active_indexes],
             line_lengths,
             inward_distances[active_indexes],
             from_start[active_indexes],
             ray_lengths[active_indexes],
+            (
+                ray_directions[active_indexes]
+                if ray_directions is not None
+                else None
+            ),
         )
-        last_centers[active_indexes] = centers
-        last_perpendicular_x[active_indexes] = perp_x
-        last_perpendicular_y[active_indexes] = perp_y
         hits = _nearest_ray_hits_parallel(
             rays,
             origins,
@@ -2102,7 +2379,7 @@ def _draw_crossings_noded(
         hits_a = hits[0::2]
         hits_e = hits[1::2]
         has_hits = (
-            tangent_valid
+            direction_valid
             & ~pd.isna(hits_a)
             & ~pd.isna(hits_e)
         )
@@ -2137,29 +2414,15 @@ def _draw_crossings_noded(
             )
         exhausted_indexes = retry_indexes[~can_move]
         active[exhausted_indexes] = False
-        fallback[exhausted_indexes] = base_lengths[exhausted_indexes] <= abs_max_crossing_len
         progress.update(1)
 
     remaining = np.flatnonzero(active)
     if len(remaining):
-        fallback[remaining] = base_lengths[remaining] <= abs_max_crossing_len
         active[remaining] = False
 
-    fallback_indexes = np.flatnonzero(fallback & ~accepted)
-    if len(fallback_indexes):
-        half = base_lengths[fallback_indexes] / 2.0
-        center_x = shapely.get_x(last_centers[fallback_indexes])
-        center_y = shapely.get_y(last_centers[fallback_indexes])
-        point_a[fallback_indexes] = shapely.points(
-            center_x + last_perpendicular_x[fallback_indexes] * half,
-            center_y + last_perpendicular_y[fallback_indexes] * half,
-        )
-        point_e[fallback_indexes] = shapely.points(
-            center_x - last_perpendicular_x[fallback_indexes] * half,
-            center_y - last_perpendicular_y[fallback_indexes] * half,
-        )
-
-    keep = accepted | fallback
+    # The GUI skips a candidate when both sidewalk intersections cannot be
+    # found.  Do not synthesize width-only fallback crossings.
+    keep = accepted
     if not np.any(keep):
         progress.close()
         return generator._empty_result()
@@ -2197,7 +2460,7 @@ def _draw_crossings_noded(
             "segment_id": output_segment_ids[keep],
             "node_degree": candidate_degrees[keep],
             "center_offset_m": inward_distances[keep],
-            "used_fallback": fallback[keep] & ~accepted[keep],
+            "used_fallback": np.zeros(int(np.count_nonzero(keep)), dtype=bool),
         },
         geometry=crossing_geometries,
         crs=generator.crs,
@@ -2218,6 +2481,9 @@ def draw_crossings_gdf(
     increment_inward: float = 0.5,
     max_crossings_iterations: int = 20,
     abs_max_crossing_len: float = 100.0,
+    min_segment_length: float = 20.0,
+    center_buffer_distance: float = 1.0,
+    crossing_direction_mode: str = "parallel",
     perc_tol_crossings: float = 25.0,
     perc_draw_kerbs: float = 30.0,
     ray_growth_factor: float = 2.0,
@@ -2233,6 +2499,12 @@ def draw_crossings_gdf(
     crs = streets_gdf.crs if streets_gdf is not None else None
     generator = _CrossingsGenerator()
     generator.crs = crs
+
+    crossing_direction_mode = crossing_direction_mode.lower()
+    if crossing_direction_mode not in {"parallel", "perpendicular"}:
+        raise ValueError(
+            "crossing_direction_mode must be 'parallel' or 'perpendicular'"
+        )
 
 
     if streets_gdf is None or streets_gdf.empty:
@@ -2257,8 +2529,22 @@ def draw_crossings_gdf(
     generator.sidewalk_geometries = sidewalk_geometries
     generator.sidewalk_tree = STRtree(sidewalk_geometries)
 
-    # Keep protoblock argument for API completeness (not yet used for filtering).
-    _ = protoblocks_gdf
+    if protoblocks_gdf is not None:
+        protoblock_geometries = np.asarray(
+            protoblocks_gdf.geometry.array,
+            dtype=object,
+        )
+        valid_protoblocks = (
+            ~shapely.is_missing(protoblock_geometries)
+            & ~shapely.is_empty(protoblock_geometries)
+            & np.isin(shapely.get_type_id(protoblock_geometries), [3, 6])
+        )
+        protoblock_geometries = protoblock_geometries[valid_protoblocks]
+        generator.protoblocks_union = (
+            shapely.union_all(protoblock_geometries)
+            if len(protoblock_geometries)
+            else shapely.GeometryCollection()
+        )
 
     tolerance = max(3, int(node_precision))
     kerb_fraction = max(0.0, min(perc_draw_kerbs / 100.0, 0.49))
@@ -2271,6 +2557,7 @@ def draw_crossings_gdf(
     generator.tolerance = tolerance
     generator.kerb_fraction = kerb_fraction
     generator.base_curve_radius = base_curve_radius
+    generator.center_buffer_distance = max(0.0, center_buffer_distance)
     generator.ray_growth_factor_local = ray_growth_factor_local
     generator.max_ray_iterations_local = max_ray_iterations_local
     generator.distance_tol = distance_tol
@@ -2284,6 +2571,8 @@ def draw_crossings_gdf(
             increment_inward=increment_inward,
             max_crossings_iterations=max_crossings_iterations,
             abs_max_crossing_len=abs_max_crossing_len,
+            min_segment_length=min_segment_length,
+            crossing_direction_mode=crossing_direction_mode,
             perc_tol_crossings=perc_tol_crossings,
             show_progress=show_progress,
         )
@@ -2396,9 +2685,6 @@ def draw_crossings_gdf(
 
     for entry in node_data.values():
         entry["degree"] = len(entry["segments"])
-        entry["major_width"] = (
-            max(entry["widths"]) if entry["widths"] else fallback_width
-        )
 
 
 
@@ -2434,11 +2720,18 @@ def draw_crossings_gdf(
                 continue
 
             line_length = line.length
-            if line_length <= 0:
+            if line_length < max(0.0, min_segment_length):
                 continue
 
-            major_width = node["major_width"]
-            initial_inward = 0.5 * major_width + base_curve_radius + inward_offset
+            transversal_width = generator._transversal_width(
+                node,
+                idx,
+                segment_width,
+                segment_info,
+            )
+            initial_inward = (
+                0.5 * transversal_width + base_curve_radius + inward_offset
+            )
             base_distance = node_entry["distance"]
             available_forward = line_length - base_distance
             available_backward = base_distance
@@ -2460,11 +2753,19 @@ def draw_crossings_gdf(
                 if current_inward <= distance_tol:
                     continue
 
-                attempt = 0
-                record_added = False
-                last_center = None
-                last_perp = None
+                initial_center = generator._interpolate_along(
+                    line,
+                    base_distance,
+                    direction,
+                    current_inward,
+                )
+                if (
+                    initial_center is None
+                    or not generator._center_is_eligible(initial_center)
+                ):
+                    continue
 
+                attempt = 0
                 while attempt < max_crossings_iterations:
                     center = generator._interpolate_along(
                         line, base_distance, direction, current_inward
@@ -2476,12 +2777,32 @@ def draw_crossings_gdf(
                     tangent = generator._tangent_direction(line, distance_along)
                     if tangent is None:
                         break
-                    perp = generator._perpendicular(tangent)
-                    last_center = center
-                    last_perp = perp
+                    current_direction = (
+                        tangent
+                        if direction > 0
+                        else (-tangent[0], -tangent[1])
+                    )
+                    crossing_direction = None
+                    if crossing_direction_mode == "parallel":
+                        crossing_direction = generator._transversal_direction(
+                            node,
+                            idx,
+                            current_direction,
+                            segment_info,
+                        )
+                    if crossing_direction is None:
+                        crossing_direction = generator._perpendicular(tangent)
 
-                    point_a = generator._cast_ray(center, perp, base_length)
-                    point_e = generator._cast_ray(center, (-perp[0], -perp[1]), base_length)
+                    point_a = generator._cast_ray(
+                        center,
+                        crossing_direction,
+                        base_length,
+                    )
+                    point_e = generator._cast_ray(
+                        center,
+                        (-crossing_direction[0], -crossing_direction[1]),
+                        base_length,
+                    )
 
                     if point_a is None or point_e is None:
                         attempt += 1
@@ -2490,30 +2811,6 @@ def draw_crossings_gdf(
                                 current_inward + increment_inward, max_inward
                             )
                             continue
-
-                        if base_length <= abs_max_crossing_len:
-                            half = base_length / 2.0
-                            fallback_a = Point(
-                                center.x + perp[0] * half,
-                                center.y + perp[1] * half,
-                            )
-                            fallback_e = Point(
-                                center.x - perp[0] * half,
-                                center.y - perp[1] * half,
-                            )
-                            record = generator._build_crossing_record(
-                                fallback_a,
-                                fallback_e,
-                                base_length,
-                                max_allowed,
-                                idx,
-                                node["degree"],
-                                current_inward,
-                                fallback=True,
-                            )
-                            if record:
-                                records.append(record)
-                                record_added = True
                         break
 
                     crossing_length = point_a.distance(point_e)
@@ -2538,7 +2835,6 @@ def draw_crossings_gdf(
                         )
                         if record:
                             records.append(record)
-                            record_added = True
                         break
 
                     attempt += 1
@@ -2546,34 +2842,6 @@ def draw_crossings_gdf(
                         break
 
                     current_inward = min(current_inward + increment_inward, max_inward)
-
-                if (
-                    not record_added
-                    and last_center is not None
-                    and last_perp is not None
-                    and base_length <= abs_max_crossing_len
-                ):
-                    half = base_length / 2.0
-                    fallback_a = Point(
-                        last_center.x + last_perp[0] * half,
-                        last_center.y + last_perp[1] * half,
-                    )
-                    fallback_e = Point(
-                        last_center.x - last_perp[0] * half,
-                        last_center.y - last_perp[1] * half,
-                    )
-                    record = generator._build_crossing_record(
-                        fallback_a,
-                        fallback_e,
-                        base_length,
-                        max_allowed,
-                        idx,
-                        node["degree"],
-                        current_inward,
-                        fallback=True,
-                    )
-                    if record:
-                        records.append(record)
 
                 processed_dirs.add(dir_key)
 
@@ -3633,7 +3901,11 @@ def draw_sidewalks_gdf(
     sidewalks_gdf = gpd.GeoDataFrame(geometry=sidewalk_gs, crs=gdf.crs)
 
     # Step 8: Handle exclusion/sure zones
-    sidewalks_gdf = handle_sidewalk_tags(sidewalks_gdf, streets_gdf)
+    sidewalks_gdf = handle_sidewalk_tags(
+        sidewalks_gdf,
+        streets_gdf,
+        added_width=buffer_dist,
+    )
 
     # Step 9: Calculate properties
     sidewalks_gdf = calculate_sidewalk_properties(sidewalks_gdf)
