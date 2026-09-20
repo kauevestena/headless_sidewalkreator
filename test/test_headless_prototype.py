@@ -38,7 +38,10 @@ def test_sidewalkreator_api(setup_test_dir, test_polygon_gdf, osm_sample_gdf):
     # Use the new GeoDataFrame-based API
     result = sidewalkreator(
         input_polygon_gdf=test_polygon_gdf,
-        osm_gdf=osm_sample_gdf
+        osm_gdf=osm_sample_gdf,
+        # This API/export smoke test intentionally keeps the fixture's open
+        # crossing arms. Dead-end pruning behavior is covered separately.
+        parameters={"dead_end_removal_iterations": 0},
     )
 
     # Verify the result structure
