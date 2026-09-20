@@ -313,21 +313,28 @@ def _draw_sidewalks(
 
 
 def _apply_dead_end_removal(
-    sidewalks_gdf: gpd.GeoDataFrame,
-    ignore_existing: bool,
+    streets_gdf: gpd.GeoDataFrame,
     dead_end_removal_iterations: int,
     show_progress: bool = False,
 ) -> gpd.GeoDataFrame:
-    """Remove lines from no-block zones (dead ends)."""
-    # 11. Remove lines from no-block zones if ignore_existing is False
-    if not ignore_existing:
-        sidewalks_gdf = remove_lines_from_no_block_gdf(
-            sidewalks_gdf,
-            iterations=dead_end_removal_iterations,
-            show_progress=show_progress,
-        )
-    logger.info("Step 11 complete")
-    return sidewalks_gdf
+    """Prune dead-end street segments before protoblock generation.
+
+    Both QGIS implementations apply this operation to the split street network,
+    before polygonization and sidewalk buffering.  Applying it to generated
+    sidewalk components can delete kilometres of otherwise valid output when a
+    component has an open endpoint at an AOI boundary.
+    """
+    if dead_end_removal_iterations <= 0:
+        return streets_gdf
+
+    pruned_gdf = remove_lines_from_no_block_gdf(
+        streets_gdf,
+        iterations=dead_end_removal_iterations,
+        show_progress=show_progress,
+    )
+    pruned_gdf.attrs.update(streets_gdf.attrs)
+    logger.info("Dead-end street removal complete")
+    return pruned_gdf
 
 
 def _generate_crossings(
@@ -622,6 +629,20 @@ def sidewalkreator(
     if topology_stats is not None:
         run_params["protomaps_topology_stats"] = topology_stats
 
+    # Match the QGIS GUI and Processing Provider: dead-end removal operates on
+    # split streets before protoblocks and sidewalk geometry are generated.  It
+    # is independent from the existing-sidewalk policy controlled by
+    # ``ignore_existing``.
+    splitted_gdf = _run_timed_stage(
+        "Step 7b: remove dead-end streets",
+        show_progress,
+        _apply_dead_end_removal,
+        splitted_gdf,
+        run_params["dead_end_removal_iterations"],
+        show_progress=show_progress,
+        _overall_progress=overall_progress,
+    )
+
     _run_timed_stage(
         "Debug: save split-line layer",
         show_progress,
@@ -665,18 +686,6 @@ def sidewalkreator(
         buildings_gdf,
         cleaned_gdf,
         run_params,
-        _overall_progress=overall_progress,
-    )
-
-    # 11. Apply dead end removal
-    sidewalks_gdf = _run_timed_stage(
-        "Step 11: remove dead ends",
-        show_progress,
-        _apply_dead_end_removal,
-        sidewalks_gdf,
-        ignore_existing,
-        run_params["dead_end_removal_iterations"],
-        show_progress=show_progress,
         _overall_progress=overall_progress,
     )
 

@@ -115,6 +115,59 @@ def test_sidewalkreator_preprocesses_once_for_protoblocks(monkeypatch, osm_sampl
     assert isinstance(result["protoblocks"], gpd.GeoDataFrame)
 
 
+@pytest.mark.parametrize("ignore_existing", [False, True])
+def test_dead_end_pruning_precedes_geometry_generation(
+    monkeypatch,
+    osm_sample_gdf,
+    ignore_existing,
+):
+    """Dead ends are street preprocessing, not sidewalk post-processing."""
+    import headless_sidewalkreator.full_sidewalkreator_algorithm as algorithm
+
+    polygon = Polygon([(-1, -1), (-1, 2), (2, 2), (2, -1), (-1, -1)])
+    input_polygon_gdf = gpd.GeoDataFrame(geometry=[polygon], crs="EPSG:4326")
+    events = []
+
+    original_prune = algorithm.remove_lines_from_no_block_gdf
+    original_protoblocks = algorithm._generate_protoblocks_from_splitted_lines
+    original_draw = algorithm._draw_sidewalks
+
+    def tracked_prune(streets_gdf, *args, **kwargs):
+        events.append("prune_streets")
+        assert list(streets_gdf.columns) == ["geometry"]
+        return original_prune(streets_gdf, *args, **kwargs)
+
+    def tracked_protoblocks(*args, **kwargs):
+        events.append("generate_protoblocks")
+        assert events[0] == "prune_streets"
+        return original_protoblocks(*args, **kwargs)
+
+    def tracked_draw(*args, **kwargs):
+        events.append("draw_sidewalks")
+        assert events.index("prune_streets") < events.index("draw_sidewalks")
+        return original_draw(*args, **kwargs)
+
+    monkeypatch.setattr(algorithm, "remove_lines_from_no_block_gdf", tracked_prune)
+    monkeypatch.setattr(
+        algorithm,
+        "_generate_protoblocks_from_splitted_lines",
+        tracked_protoblocks,
+    )
+    monkeypatch.setattr(algorithm, "_draw_sidewalks", tracked_draw)
+    monkeypatch.setattr(algorithm, "save_debug_layer", lambda *args, **kwargs: None)
+
+    result = algorithm.sidewalkreator(
+        input_polygon_gdf=input_polygon_gdf,
+        osm_gdf=osm_sample_gdf,
+        parameters={"dead_end_removal_iterations": 1},
+        ignore_existing=ignore_existing,
+    )
+
+    assert events.count("prune_streets") == 1
+    assert events.index("prune_streets") < events.index("generate_protoblocks")
+    assert not result["sidewalks"].empty
+
+
 def test_sidewalkreator_protoblocks_match_standalone_api(monkeypatch, osm_sample_gdf):
     """The full pipeline should expose the same protoblocks as the standalone API."""
     import headless_sidewalkreator.full_sidewalkreator_algorithm as algorithm

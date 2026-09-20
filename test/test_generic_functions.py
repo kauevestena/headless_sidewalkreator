@@ -279,6 +279,27 @@ def test_remove_lines_from_no_block_gdf_prunes_degree_one_chain():
     assert cleaned_gdf.empty
 
 
+def test_remove_lines_from_no_block_gdf_preserves_street_attributes():
+    outer = LineString([(0, 0), (1, 0), (1, 1), (0, 1), (0, 0)])
+    dead_end = LineString([(1, 0), (2, 0)])
+    gdf = gpd.GeoDataFrame(
+        {
+            "highway": ["residential", "service"],
+            "width": [6.0, 3.0],
+            "sidewalk": [None, "no"],
+            "geometry": [outer, dead_end],
+        },
+        crs="EPSG:3857",
+    )
+
+    cleaned_gdf = remove_lines_from_no_block_gdf(gdf)
+
+    assert len(cleaned_gdf) == 1
+    assert cleaned_gdf.iloc[0]["highway"] == "residential"
+    assert cleaned_gdf.iloc[0]["width"] == 6.0
+    assert list(cleaned_gdf.columns) == list(gdf.columns)
+
+
 def test_remove_lines_from_no_block_gdf_empty_input():
     """Test remove_lines_from_no_block_gdf with an empty GeoDataFrame."""
     gdf = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")

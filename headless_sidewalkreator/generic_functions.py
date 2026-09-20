@@ -1321,12 +1321,13 @@ def remove_lines_from_no_block_gdf(
         & ~shapely.is_empty(geometries)
         & np.isin(geometry_types, [0, 1, 2])
     )
+    valid_positions = np.flatnonzero(valid)
     geometries = geometries[valid]
     geometry_types = geometry_types[valid]
     progress.update(1)
     if len(geometries) == 0:
         progress.close()
-        return gpd.GeoDataFrame(geometry=[], crs=gdf.crs)
+        return gdf.iloc[0:0].copy()
 
     starts = np.empty(len(geometries), dtype=object)
     ends = np.empty(len(geometries), dtype=object)
@@ -1369,7 +1370,10 @@ def remove_lines_from_no_block_gdf(
             break
         active = active[keep]
 
-    return gpd.GeoDataFrame(geometry=geometries[active], crs=gdf.crs)
+    # Keep the source rows rather than rebuilding a geometry-only frame.  The
+    # GUI applies this operation to street segments before sidewalk generation,
+    # so downstream width and OSM tag fields must survive the pruning step.
+    return gdf.iloc[valid_positions[active]].copy()
 
 
 def _dissolve_and_buffer_protoblocks(
