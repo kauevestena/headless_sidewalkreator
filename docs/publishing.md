@@ -32,7 +32,7 @@ and [publishing](https://docs.pypi.org/trusted-publishers/using-a-publisher/).
 1. Merge the reviewed preparation PR. Confirm CI and Package validation pass.
 2. Run **Publish Python package** manually on that reviewed branch, selecting
    `testpypi`. It rebuilds the sdist and a wheel from it, checks metadata, and
-   tests the installed wheel outside the checkout on Python 3.11–3.13 before upload.
+   tests the installed wheel outside the checkout on Python 3.11–3.15 before upload.
 3. Verify the TestPyPI release in a new environment. Download only this package
    from TestPyPI, then resolve dependencies from normal PyPI (avoid mixing indexes):
 
@@ -70,3 +70,9 @@ packaging.
 Packaging readiness does not certify Từ Liêm production acceptance: GUI geometry
 comparison and manual network QA remain necessary. Road attributes lost during
 line splitting are a separate known algorithmic limitation.
+
+Python 3.15 is currently a prerelease CI target. Both CI workflows allow a
+prerelease interpreter for that version only and keep all matrix jobs required.
+Dependency installation failures are reported as compatibility blockers, not
+silently skipped. Matrix fail-fast is disabled so every version is exercised.
+Adding a CI target does not by itself certify support for that interpreter.

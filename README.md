@@ -7,7 +7,7 @@ OSM Sidewalkreator.
 
 ## Installation
 
-Python 3.11 or newer is required; CI tests Python 3.11–3.13 on Linux.
+Python 3.11 or newer is required; CI tests Python 3.11–3.15 on Linux.
 The distribution name is `sidewalkreator`; the Python import remains
 `headless_sidewalkreator`. Version 0.1.0 is being prepared for its first PyPI
 release. Until published, install from a checkout with `python -m pip install .`.
@@ -233,3 +233,9 @@ these steps.
 This is the headless version of a QGIS Plugin called OSM Sidewalkreator, available at:
 
 https://github.com/kauevestena/osm_sidewalkreator
+
+Python 3.15 is currently a prerelease CI target. Both CI workflows allow a
+prerelease interpreter for that version only and keep all matrix jobs required.
+Dependency installation failures are reported as compatibility blockers, not
+silently skipped. Matrix fail-fast is disabled so every version is exercised.
+Adding a CI target does not by itself certify support for that interpreter.
