@@ -4,6 +4,7 @@ from importlib.metadata import version
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 import geopandas as gpd
 from shapely.geometry import LineString, box
@@ -32,3 +33,14 @@ for name in ("sidewalks", "crossings", "kerbs", "protoblocks"):
     assert not layer.geometry.is_empty.any(), name
 assert len(result["kerbs"]) == 2 * len(result["crossings"])
 print("Offline generation passed")
+
+# Exercise real disk I/O with the default engine, without requiring Fiona.
+with tempfile.TemporaryDirectory() as directory:
+    for suffix, driver in (("geojson", "GeoJSON"), ("gpkg", "GPKG")):
+        path = Path(directory) / f"sidewalks.{suffix}"
+        result["sidewalks"].to_file(path, driver=driver)
+        restored = gpd.read_file(path)
+        assert len(restored) == len(result["sidewalks"])
+        assert restored.crs == result["sidewalks"].crs
+        assert restored.geometry.is_valid.all()
+print("GeoJSON and GeoPackage round trips passed")

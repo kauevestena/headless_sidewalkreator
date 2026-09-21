@@ -76,3 +76,10 @@ prerelease interpreter for that version only and keep all matrix jobs required.
 Dependency installation failures are reported as compatibility blockers, not
 silently skipped. Matrix fail-fast is disabled so every version is exercised.
 Adding a CI target does not by itself certify support for that interpreter.
+
+The mandatory Fiona dependency was replaced with Pyogrio and GeoPandas >=1.0:
+the code uses GeoPandas I/O, not Fiona-specific APIs. Installed-wheel smoke
+tests exercise real GeoJSON and GeoPackage round trips with the default engine.
+This removes the Fiona/GDAL source-build blocker on Python 3.14. Python 3.15
+still depends on upstream native-package compatibility and remains a required
+CI target, not a claimed supported release until its jobs pass.

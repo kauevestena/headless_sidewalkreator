@@ -126,7 +126,10 @@ sidewalkreator --bbox -72.53 42.37 -72.52 42.38 --output-dir ./output --ignore-e
 ## Development setup
 
 Modern versions of geopandas and related geospatial libraries come with
-bundled binaries, so no system-level packages are required.
+bundled binaries on supported Python/platform combinations. File I/O uses
+GeoPandas 1.0+ and its default Pyogrio backend; Fiona is not required.
+Prerelease Python versions can still require native dependency builds when
+upstream wheels are unavailable, so consult CI before choosing Python 3.15.
 
 ### Quick setup (Python 3.11+):
 
