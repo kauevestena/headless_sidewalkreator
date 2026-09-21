@@ -1,0 +1,56 @@
+name: Package validation
+on:
+  workflow_call:
+  workflow_dispatch:
+  pull_request:
+  push:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install build twine
+      # The default build builds the wheel FROM the sdist.
+      - run: python -m build
+      - run: python -m twine check --strict dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/*
+          if-no-files-found: error
+  installed-tests:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.11', '3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist
+      - name: Install wheel and test outside the checkout
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/wheel-env"
+          PY="$RUNNER_TEMP/wheel-env/bin/python"
+          "$PY" -m pip install dist/*.whl pytest pytest-cov
+          "$PY" -m pip check
+          mkdir -p "$RUNNER_TEMP/wheel-tests"
+          cp -r test data_assets pytest.ini "$RUNNER_TEMP/wheel-tests/"
+          mkdir -p "$RUNNER_TEMP/wheel-tests/debug" "$RUNNER_TEMP/wheel-tests/future"
+          cp debug/*.py "$RUNNER_TEMP/wheel-tests/debug/"
+          cp future/*.py "$RUNNER_TEMP/wheel-tests/future/"
+          cp tools/check_installed_package.py "$RUNNER_TEMP/wheel-tests/"
+          cd "$RUNNER_TEMP/wheel-tests"
+          "$PY" check_installed_package.py
+          "$PY" -m pytest -q

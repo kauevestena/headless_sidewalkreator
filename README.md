@@ -5,6 +5,23 @@ A lightweight tool for generating sidewalks from OSM data.
 This repository contains a headless (CLI / library) version of the QGIS plugin
 OSM Sidewalkreator.
 
+## Installation
+
+Python 3.11 or newer is required; CI tests Python 3.11–3.13 on Linux.
+The distribution name is `sidewalkreator`; the Python import remains
+`headless_sidewalkreator`. Version 0.1.0 is being prepared for its first PyPI
+release. Until published, install from a checkout with `python -m pip install .`.
+After publication:
+
+```bash
+python -m pip install sidewalkreator
+sidewalkreator --help
+```
+
+Generated geometry is a mapping starting point requiring review, not a verified
+production pedestrian network. Full same-input QGIS GUI geometry parity remains
+an acceptance task. See [release instructions](https://github.com/kauevestena/headless_sidewalkreator/blob/feature/headless-prototype/docs/publishing.md).
+
 ## API Overview
 ### Planet Download API
 
@@ -111,7 +128,7 @@ sidewalkreator --bbox -72.53 42.37 -72.52 42.38 --output-dir ./output --ignore-e
 Modern versions of geopandas and related geospatial libraries come with
 bundled binaries, so no system-level packages are required.
 
-### Quick setup (Python 3.9+ recommended):
+### Quick setup (Python 3.11+):
 
 1. Create and activate a Python virtual environment:
 
@@ -135,7 +152,7 @@ pip install -e .[dev]
 If you prefer conda:
 
 ```bash
-conda create -n hs-env python=3.10 -y
+conda create -n hs-env python=3.12 -y
 conda activate hs-env
 
 # install via conda-forge for potentially faster geospatial package installation
