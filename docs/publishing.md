@@ -32,7 +32,7 @@ and [publishing](https://docs.pypi.org/trusted-publishers/using-a-publisher/).
 1. Merge the reviewed preparation PR. Confirm CI and Package validation pass.
 2. Run **Publish Python package** manually on that reviewed branch, selecting
    `testpypi`. It rebuilds the sdist and a wheel from it, checks metadata, and
-   tests the installed wheel outside the checkout on Python 3.11–3.15 before upload.
+   tests the installed wheel outside the checkout on Python 3.11–3.14 before upload.
 3. Verify the TestPyPI release in a new environment. Download only this package
    from TestPyPI, then resolve dependencies from normal PyPI (avoid mixing indexes):
 
@@ -71,15 +71,20 @@ Packaging readiness does not certify Từ Liêm production acceptance: GUI geome
 comparison and manual network QA remain necessary. Road attributes lost during
 line splitting are a separate known algorithmic limitation.
 
-Python 3.15 is currently a prerelease CI target. Both CI workflows allow a
-prerelease interpreter for that version only and keep all matrix jobs required.
-Dependency installation failures are reported as compatibility blockers, not
-silently skipped. Matrix fail-fast is disabled so every version is exercised.
-Adding a CI target does not by itself certify support for that interpreter.
+TODO: Restore Python 3.15 verification in both the source-test and installed-wheel
+CI matrices once the native dependency ecosystem is ready. Verification is
+deferred as of September 22, 2026; Python 3.15 is not currently verified or a
+release gate. Python 3.11–3.14 remain required, with matrix fail-fast disabled.
 
 The mandatory Fiona dependency was replaced with Pyogrio and GeoPandas >=1.0:
 the code uses GeoPandas I/O, not Fiona-specific APIs. Installed-wheel smoke
 tests exercise real GeoJSON and GeoPackage round trips with the default engine.
-This removes the Fiona/GDAL source-build blocker on Python 3.14. Python 3.15
-still depends on upstream native-package compatibility and remains a required
-CI target, not a claimed supported release until its jobs pass.
+This removes the Fiona/GDAL source-build blocker on Python 3.14.
+
+The current Python 3.15 blocker is a Shapely 2.1.2 source-build failure on
+3.15rc2: `numpy/ndarraytypes.h` is missing
+([failed installed-wheel job](https://github.com/kauevestena/headless_sidewalkreator/actions/runs/35633260112/job/106444462872)).
+Before restoring 3.15, confirm compatible dependency wheels or successful native
+builds, then require both source tests and clean installed-wheel tests to pass,
+including CLI imports, offline generation, GeoJSON/GeoPackage round trips, and
+the full test suite.

@@ -7,7 +7,7 @@ OSM Sidewalkreator.
 
 ## Installation
 
-Python 3.11 or newer is required; CI tests Python 3.11–3.15 on Linux.
+Python 3.11 or newer is required; CI tests Python 3.11–3.14 on Linux.
 The distribution name is `sidewalkreator`; the Python import remains
 `headless_sidewalkreator`. Version 0.1.0 is being prepared for its first PyPI
 release. Until published, install from a checkout with `python -m pip install .`.
@@ -128,8 +128,8 @@ sidewalkreator --bbox -72.53 42.37 -72.52 42.38 --output-dir ./output --ignore-e
 Modern versions of geopandas and related geospatial libraries come with
 bundled binaries on supported Python/platform combinations. File I/O uses
 GeoPandas 1.0+ and its default Pyogrio backend; Fiona is not required.
-Prerelease Python versions can still require native dependency builds when
-upstream wheels are unavailable, so consult CI before choosing Python 3.15.
+Python 3.15 verification is deferred until upstream native dependencies are
+ready; see the TODO in [the publishing guide](docs/publishing.md).
 
 ### Quick setup (Python 3.11+):
 
@@ -237,8 +237,7 @@ This is the headless version of a QGIS Plugin called OSM Sidewalkreator, availab
 
 https://github.com/kauevestena/osm_sidewalkreator
 
-Python 3.15 is currently a prerelease CI target. Both CI workflows allow a
-prerelease interpreter for that version only and keep all matrix jobs required.
-Dependency installation failures are reported as compatibility blockers, not
-silently skipped. Matrix fail-fast is disabled so every version is exercised.
-Adding a CI target does not by itself certify support for that interpreter.
+TODO: Restore Python 3.15 verification in both the source-test and installed-wheel
+CI matrices once the native dependency ecosystem is ready. Verification is
+deferred as of September 22, 2026; Python 3.15 is not currently verified or a
+release gate. Python 3.11–3.14 remain required, with matrix fail-fast disabled.
