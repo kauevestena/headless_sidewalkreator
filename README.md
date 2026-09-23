@@ -5,6 +5,23 @@ A lightweight tool for generating sidewalks from OSM data.
 This repository contains a headless (CLI / library) version of the QGIS plugin
 OSM Sidewalkreator.
 
+## Installation
+
+Python 3.11 or newer is required; CI tests Python 3.11–3.14 on Linux.
+The distribution name is `sidewalkreator`; the Python import remains
+`headless_sidewalkreator`. Version 0.1.0 is being prepared for its first PyPI
+release. Until published, install from a checkout with `python -m pip install .`.
+After publication:
+
+```bash
+python -m pip install sidewalkreator
+sidewalkreator --help
+```
+
+Generated geometry is a mapping starting point requiring review, not a verified
+production pedestrian network. Full same-input QGIS GUI geometry parity remains
+an acceptance task. See [release instructions](https://github.com/kauevestena/headless_sidewalkreator/blob/feature/headless-prototype/docs/publishing.md).
+
 ## API Overview
 ### Planet Download API
 
@@ -109,9 +126,12 @@ sidewalkreator --bbox -72.53 42.37 -72.52 42.38 --output-dir ./output --ignore-e
 ## Development setup
 
 Modern versions of geopandas and related geospatial libraries come with
-bundled binaries, so no system-level packages are required.
+bundled binaries on supported Python/platform combinations. File I/O uses
+GeoPandas 1.0+ and its default Pyogrio backend; Fiona is not required.
+Python 3.15 verification is deferred until upstream native dependencies are
+ready; see the TODO in [the publishing guide](docs/publishing.md).
 
-### Quick setup (Python 3.9+ recommended):
+### Quick setup (Python 3.11+):
 
 1. Create and activate a Python virtual environment:
 
@@ -135,7 +155,7 @@ pip install -e .[dev]
 If you prefer conda:
 
 ```bash
-conda create -n hs-env python=3.10 -y
+conda create -n hs-env python=3.12 -y
 conda activate hs-env
 
 # install via conda-forge for potentially faster geospatial package installation
@@ -216,3 +236,8 @@ these steps.
 This is the headless version of a QGIS Plugin called OSM Sidewalkreator, available at:
 
 https://github.com/kauevestena/osm_sidewalkreator
+
+TODO: Restore Python 3.15 verification in both the source-test and installed-wheel
+CI matrices once the native dependency ecosystem is ready. Verification is
+deferred as of September 22, 2026; Python 3.15 is not currently verified or a
+release gate. Python 3.11–3.14 remain required, with matrix fail-fast disabled.
