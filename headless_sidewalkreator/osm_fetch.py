@@ -82,8 +82,10 @@ def get_osm_data(
         GeoDataFrame with features.
     """
     if provider == "overture":
-        downloader = OvertureDownloader(**kwargs)
-        return downloader.get_data(bbox, tags)
+        overture_kwargs = dict(kwargs)
+        show_progress = overture_kwargs.pop("show_progress", False)
+        downloader = OvertureDownloader(**overture_kwargs)
+        return downloader.get_data(bbox, tags, show_progress=show_progress)
     elif provider == "protomaps":
         protomaps_kwargs = dict(kwargs)
         downloader = ProtomapsDownloader(url=protomaps_kwargs.pop("url", None))
@@ -94,6 +96,9 @@ def get_osm_data(
             max_retries=max_retries,
             **protomaps_kwargs,
         )
+
+    if provider is not None:
+        raise ValueError("provider must be None, 'overture', or 'protomaps'")
 
     # Default to OSMnx
     north, south, east, west = _normalize_bbox(bbox)

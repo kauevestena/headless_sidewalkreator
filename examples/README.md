@@ -95,7 +95,9 @@ For a detailed understanding of how the sidewalk generation algorithm works, ple
 ## Modifying the Examples
 
 All examples are designed to be educational and hackable:
-- Parameters can be adjusted in the `parameters={}` dictionary
+- Parameters can be adjusted in the `parameters={}` dictionary; consult the
+  [complete parameter reference](../docs/parameters.rst) for defaults, units,
+  validation, per-API applicability and option interactions.
 - Different input areas can be used by changing the input source
 - Output paths can be customized by modifying the `output_dir` variables
 
@@ -139,7 +141,9 @@ If you encounter timeout errors when downloading OSM data:
 ### Empty Results
 If no sidewalks are generated:
 - The area might already have complete sidewalk coverage in OSM
-- Try using `ignore_existing=True` to generate all possible sidewalks
+- Inspect the input topology and dead-end pruning settings. Set `ignore_existing=True`
+  to bypass the mapped-sidewalk coverage filter; separate road-tag exclusions
+  still apply. See the [parameter reference](../docs/parameters.rst).
 - Check that the input area contains roads
 
 ### Memory Issues

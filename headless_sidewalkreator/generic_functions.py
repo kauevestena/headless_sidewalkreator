@@ -294,40 +294,14 @@ def fetch_street_network_for_bbox(
         A GeoDataFrame containing the street network.
     """
     tags = {"highway": True, "building": True, "amenity": True, "shop": True}
-    try:
-        gdf = get_osm_data(bbox, tags=tags, timeout=timeout, provider=provider, **kwargs)
-    except Exception:
-        gdf = None
-
-    # If OSM fetch failed or returned empty (e.g., in offline test env),
-    # create a small synthetic street network inside the bbox so downstream
-    # processing can continue deterministically in tests.
+    if hasattr(bbox, "total_bounds"):
+        bbox = get_bbox_from_gdf(bbox)
+    gdf = get_osm_data(bbox, tags=tags, timeout=timeout, provider=provider, **kwargs)
     if gdf is None or gdf.empty:
-        try:
-            minx, miny, maxx, maxy = bbox
-        except Exception:
-            # bbox may be (north,south,east,west) or similar; normalize
-            arr = get_bbox_from_gdf(bbox) if hasattr(bbox, "total_bounds") else bbox
-            minx, miny, maxx, maxy = arr
-
-        # Create a small cross network and one extra branch
-        lines = [
-            LineString([(minx, miny), (maxx, maxy)]),
-            LineString([(minx, maxy), (maxx, miny)]),
-            LineString(
-                [(minx, (miny + maxy) / 2), ((minx + maxx) / 2, (miny + maxy) / 2)]
-            ),
-        ]
-        gdf = gpd.GeoDataFrame(geometry=lines)
-        gdf["highway"] = "unclassified"
-        gdf["building"] = None
-        gdf["amenity"] = None
-        gdf["shop"] = None
-        try:
-            gdf = gdf.set_crs("EPSG:4326")
-        except Exception:
-            gdf.crs = "EPSG:4326"
-
+        raise RuntimeError(
+            "No data was downloaded for the requested area. Check the provider, "
+            "network and area, or supply a saved osm_gdf."
+        )
     return gdf
 
 
@@ -1004,7 +978,7 @@ def normalize_protomaps_topology(
     progress.close()
 
     stats["duration_s"] = time.perf_counter() - started
-    result = gpd.GeoDataFrame(geometry=repaired_lines, crs=noded_gdf.crs)
+    result = _restore_line_attributes(gdf, repaired_lines)
     result.attrs.update(source_attrs)
     result.attrs["protomaps_topology"] = stats
     logger.info(
@@ -1025,6 +999,40 @@ def normalize_protomaps_topology(
     return result
 
 
+def _restore_line_attributes(source: gpd.GeoDataFrame, lines) -> gpd.GeoDataFrame:
+    """Associate noded/repaired segments with their longest overlapping source.
+
+    Coincident sources use the first input row. This preserves widths and OSM
+    tags without duplicating the noded geometry. Short repair connectors inherit
+    the first touching source when neither source has a positive overlap.
+    """
+    lines = np.asarray(lines, dtype=object)
+    if len(lines) == 0:
+        return source.iloc[0:0].copy()
+    if len(source.columns) == 1:
+        result = gpd.GeoDataFrame(geometry=lines, crs=source.crs)
+    else:
+        sources = source.explode(index_parts=False, ignore_index=True)
+        sources = sources[sources.geometry.notna() & ~sources.geometry.is_empty]
+        source_lines = np.asarray(shapely.set_precision(sources.geometry.array, 1e-4))
+        tree = STRtree(source_lines)
+        pairs = tree.query(lines, predicate="dwithin", distance=1e-4)
+        overlap = shapely.length(shapely.intersection(lines[pairs[0]], source_lines[pairs[1]]))
+        order = np.lexsort((pairs[1], -overlap, pairs[0]))
+        ordered = pairs[0, order]
+        first = np.r_[True, ordered[1:] != ordered[:-1]]
+        selected = order[first]
+        owners = np.full(len(lines), -1, dtype=int)
+        owners[pairs[0, selected]] = pairs[1, selected]
+        missing = np.flatnonzero(owners < 0)
+        if len(missing):
+            owners[missing] = tree.nearest(lines[missing])
+        result = sources.iloc[owners].copy().reset_index(drop=True)
+        result.geometry = lines
+    result.attrs.update(source.attrs)
+    return result
+
+
 def split_lines_at_intersections(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """Splits lines at their intersections.
 
@@ -1035,7 +1043,8 @@ def split_lines_at_intersections(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         gdf: A GeoDataFrame containing LineString geometries.
 
     Returns:
-        A new GeoDataFrame containing the split line segments.
+        Split line segments with their source attributes. Coincident source
+        lines use the first row's attributes.
     """
     if gdf.empty:
         return gdf.copy()
@@ -1048,7 +1057,7 @@ def split_lines_at_intersections(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     gdf.geometry = set_precision(gdf.geometry, 1e-4)
     merged = gdf.geometry.union_all()
 
-    result = gpd.GeoDataFrame(geometry=_line_parts(merged), crs=gdf.crs)
+    result = _restore_line_attributes(gdf, _line_parts(merged))
     result.attrs.update(gdf.attrs)
     return result
 
@@ -1113,7 +1122,7 @@ def adjust_buffer_for_buildings(
         road_widths = pd.to_numeric(
             lines_gdf["width"],
             errors="coerce",
-        ).to_numpy(dtype=float)
+        ).to_numpy(dtype=float, copy=True)
         road_widths[~np.isfinite(road_widths) | (road_widths <= 0)] = 6.0
     else:
         road_widths = np.full(len(lines_gdf), 6.0, dtype=float)
@@ -1400,72 +1409,56 @@ def filter_and_buffer_protoblocks_gdf(
     ignore_existing: bool = False,
     show_progress: bool = False,
 ) -> gpd.GeoDataFrame:
-    """Filters and buffers the protoblocks based on sidewalk coverage.
+    """Filter by existing sidewalk length/perimeter, then dissolve and buffer.
 
-    This function filters out protoblocks that have a high percentage of their
-    area already covered by existing sidewalks. The remaining protoblocks are
-    then dissolved and buffered.
-
-    Args:
-        protoblocks_gdf: A GeoDataFrame of protoblock polygons.
-        sidewalks_gdf: A GeoDataFrame of existing sidewalk polygons.
-        cutoff_percent: The percentage of sidewalk area above which a
-            protoblock will be filtered out.
-        ignore_existing: If True, skips filtering based on existing sidewalks
-            and returns all protoblocks (dissolved and buffered).
-
-    Returns:
-        A GeoDataFrame containing the filtered and buffered protoblocks.
+    See :func:`filter_protoblocks_by_sidewalks` for the coverage definition.
     """
-    if ignore_existing or sidewalks_gdf.empty:
-        return _dissolve_and_buffer_protoblocks(protoblocks_gdf)
-
-    progress = tqdm(
-        total=4,
-        desc="Protoblocks: filtering sidewalk coverage",
-        unit="operation",
-        disable=not show_progress,
-        position=1,
-        leave=False,
-        dynamic_ncols=True,
+    filtered = filter_protoblocks_by_sidewalks(
+        protoblocks_gdf, sidewalks_gdf, cutoff_percent, ignore_existing, show_progress
     )
+    return _dissolve_and_buffer_protoblocks(filtered)
 
-    # Calculate sidewalk area and store it in a new column
-    sidewalks_with_area_gdf = sidewalks_gdf.copy()
-    sidewalks_with_area_gdf["sidewalk_area_val"] = sidewalks_with_area_gdf.geometry.area
-    progress.update(1)
 
-    # Spatial join
-    joined_gdf = gpd.sjoin(
-        protoblocks_gdf, sidewalks_with_area_gdf, how="inner", predicate="intersects"
-    )
-    progress.update(1)
+def filter_protoblocks_by_sidewalks(
+    protoblocks_gdf: gpd.GeoDataFrame,
+    sidewalks_gdf: gpd.GeoDataFrame,
+    cutoff_percent: float,
+    ignore_existing: bool = False,
+    show_progress: bool = False,
+) -> gpd.GeoDataFrame:
+    """Keep blocks with mapped sidewalk coverage <= the cutoff (0–100%).
 
-    # Sum the areas of intersecting sidewalks for each protoblock
-    sidewalk_area_per_protoblock = joined_gdf.groupby(
-        joined_gdf.index
-    ).sidewalk_area_val.sum()
-
-    # Calculate protoblock area
-    protoblocks_gdf["protoblock_area"] = protoblocks_gdf.geometry.area
-
-    # Join the two series
-    protoblocks_gdf = protoblocks_gdf.join(sidewalk_area_per_protoblock)
-    protoblocks_gdf.rename(columns={"sidewalk_area_val": "sidewalk_area"}, inplace=True)
-    protoblocks_gdf["sidewalk_area"] = protoblocks_gdf["sidewalk_area"].fillna(0)
-
-    # Calculate ratio and filter
-    protoblocks_gdf["ratio"] = (
-        protoblocks_gdf["sidewalk_area"] / protoblocks_gdf["protoblock_area"]
-    ) * 100
-    filtered_protoblocks = protoblocks_gdf[protoblocks_gdf["ratio"] <= cutoff_percent]
-    progress.update(1)
-
-    # Dissolve and buffer
-    result = _dissolve_and_buffer_protoblocks(filtered_protoblocks)
-    progress.update(1)
-    progress.close()
-    return result
+    Coverage is the unique existing sidewalk length clipped to a block,
+    divided by that block's perimeter, times 100 (capped at 100%). Polygon
+    sidewalks contribute their boundary. Inputs must use the same metric CRS.
+    Neither input is modified; empty inputs and ignore_existing keep all blocks.
+    """
+    if isinstance(cutoff_percent, bool) or not isinstance(cutoff_percent, (int, float)):
+        raise ValueError("cutoff_percent_protoblock must be a number from 0 to 100")
+    if not math.isfinite(cutoff_percent) or not 0 <= cutoff_percent <= 100:
+        raise ValueError("cutoff_percent_protoblock must be a number from 0 to 100")
+    if ignore_existing or protoblocks_gdf.empty or sidewalks_gdf.empty:
+        return protoblocks_gdf.copy()
+    if protoblocks_gdf.crs != sidewalks_gdf.crs:
+        raise ValueError("Protoblocks and existing sidewalks must have the same CRS")
+    lines = []
+    for geometry in sidewalks_gdf.geometry:
+        if geometry is not None:
+            if geometry.geom_type in {"Polygon", "MultiPolygon"}:
+                geometry = geometry.boundary
+            lines.extend(_line_parts(geometry))
+    if not lines:
+        return protoblocks_gdf.copy()
+    lines = np.asarray(lines, dtype=object)
+    tree = STRtree(lines)
+    keep = []
+    for block in _maybe_tqdm(protoblocks_gdf.geometry, show_progress,
+                             desc="Filtering existing sidewalks", unit="block"):
+        matches = tree.query(block, predicate="intersects")
+        covered = shapely.union_all(shapely.intersection(lines[matches], block)).length
+        coverage = min(100.0, 100.0 * covered / block.length) if block.length else 0.0
+        keep.append(coverage <= cutoff_percent)
+    return protoblocks_gdf.iloc[np.flatnonzero(keep)].copy()
 
 
 def calculate_crossing_direction(point: Point, lines_df: gpd.GeoDataFrame) -> Point:
@@ -3559,7 +3552,9 @@ def split_sidewalks_gdf(
         )
 
     if intersection_points_gdf.empty:
-        return sidewalks_gdf
+        return merge_short_segments_gdf(
+            sidewalks_gdf, min_stretch_size, show_progress=show_progress
+        )
 
     crossing_points = np.asarray(
         intersection_points_gdf.geometry.array,

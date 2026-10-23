@@ -45,6 +45,7 @@ dependencies = [
 "Homepage" = "https://github.com/kauevestena/headless_sidewalkreator"
 "Source" = "https://github.com/kauevestena/headless_sidewalkreator"
 "Tracker" = "https://github.com/kauevestena/headless_sidewalkreator/issues"
+"Documentation" = "https://kauevestena.github.io/headless_sidewalkreator/"
 
 [project.optional-dependencies]
 dev = [

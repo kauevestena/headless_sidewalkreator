@@ -43,9 +43,9 @@ def test_sidewalkreator_global_progress_tracks_all_pipeline_stages(
             ignore_existing=True,
         )
 
-    assert mocked_tqdm.call_args.kwargs["total"] == 10
+    assert mocked_tqdm.call_args.kwargs["total"] == 11
     assert mocked_tqdm.call_args.kwargs["desc"] == "Sidewalkreator pipeline"
-    assert progress.completed == 10
+    assert progress.completed == 11
     assert progress.closed
 
 
@@ -134,7 +134,8 @@ def test_dead_end_pruning_precedes_geometry_generation(
 
     def tracked_prune(streets_gdf, *args, **kwargs):
         events.append("prune_streets")
-        assert list(streets_gdf.columns) == ["geometry"]
+        assert {"geometry", "highway", "width"} <= set(streets_gdf.columns)
+        assert streets_gdf["width"].eq(6.0).all()
         return original_prune(streets_gdf, *args, **kwargs)
 
     def tracked_protoblocks(*args, **kwargs):
