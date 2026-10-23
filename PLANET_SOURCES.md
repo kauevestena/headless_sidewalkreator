@@ -2,6 +2,11 @@
 
 `sidewalkreator` now supports fetching data from cloud-optimized "planet" files. This allows for faster data retrieval for large areas and offline-ready workflows.
 
+See the [parameter reference](docs/parameters.rst#provider-specific-nested-options)
+for nested provider defaults, validation and acquisition behavior. Acquisition
+errors propagate and empty downloads stop generation; synthetic data is never
+substituted for real streets.
+
 ## Supported Providers
 
 ### 1. Overture Maps (GeoParquet)

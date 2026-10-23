@@ -1,5 +1,10 @@
 # SidewalKreator Algorithm Description
 
+This is a historical description of the QGIS implementation, not the current
+headless parameter contract. For the Python package's effective defaults,
+units, supported overrides and bypassed compatibility options, use the
+[parameter reference](../docs/parameters.rst).
+
 description of the version held at https://github.com/kauevestena/osm_sidewalkreator
 
 This document describes the step-by-step algorithm executed by the OSM SidewalKreator QGIS plugin (GUI), whose steps are the aim to be implemented at this very repo (the headless version that uses OSMNX+GEOPANDAS instead of QGIS API)
@@ -26,7 +31,7 @@ Once the data is fetched, this step processes it to make it suitable for generat
 
 1.  **Filter Roads**: Roads corresponding to `highway` tags that the user has set to a width of 0 are removed from the dataset. This allows the user to exclude certain road types from the analysis. Existing ways tagged as `footway=sidewalk` or `footway=crossing` are identified and stored separately.
 2.  **Protoblock Creation**: The road network is polygonized to create "protoblocks". These are the enclosed areas formed by the road network, analogous to city blocks.
-3.  **Filter Existing Sidewalks**: The plugin checks if any protoblocks already contain a significant network of `footway=sidewalk` ways. If the area of the existing sidewalks within a protoblock is above a certain percentage of the protoblock's area, that protoblock is removed, preventing the plugin from drawing sidewalks where they already exist.
+3.  **Filter Existing Sidewalks**: Blocks with substantial mapped `footway=sidewalk` coverage can be excluded. In the headless API, coverage is the unique sidewalk length clipped to each block, divided by the block perimeter and expressed as a percentage. Blocks above `cutoff_percent_protoblock` are excluded unless `ignore_existing=True`; see the parameter reference for the exact policy.
 4.  **Network Simplification**:
     *   The road lines are split at every intersection to create individual segments.
     *   The user can specify a number of iterations to remove "dead-end" streets (segments that do not form part of a closed block), which helps clean the road network topology.

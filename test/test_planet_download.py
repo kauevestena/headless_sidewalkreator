@@ -11,7 +11,7 @@ def test_get_osm_data_overture_provider(mock_overture):
     get_osm_data(bbox, provider="overture", release="latest")
 
     mock_overture.assert_called_once_with(release="latest")
-    mock_instance.get_data.assert_called_once_with(bbox, None)
+    mock_instance.get_data.assert_called_once_with(bbox, None, show_progress=False)
 
 @patch('headless_sidewalkreator.osm_fetch.ProtomapsDownloader')
 def test_get_osm_data_protomaps_provider(mock_protomaps):

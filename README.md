@@ -9,14 +9,33 @@ OSM Sidewalkreator.
 
 Python 3.11 or newer is required; CI tests Python 3.11–3.14 on Linux.
 The distribution name is `sidewalkreator`; the Python import remains
-`headless_sidewalkreator`. Version 0.1.0 is being prepared for its first PyPI
-release. Until published, install from a checkout with `python -m pip install .`.
-After publication:
+`headless_sidewalkreator`. The package is available on
+[PyPI](https://pypi.org/project/sidewalkreator/):
 
 ```bash
 python -m pip install sidewalkreator
 sidewalkreator --help
 ```
+
+## Documentation and parameters
+
+The [Sphinx documentation](https://kauevestena.github.io/headless_sidewalkreator/)
+focuses on the [complete parameter reference](docs/parameters.rst): all runtime
+keys, source-derived defaults, types, units, ranges/clamps, per-API applicability,
+road widths, provider options and CLI JSON examples.
+See [building and publishing the docs](docs/maintaining.md) for local commands
+and the GitHub Pages workflow.
+
+Pass runtime keys in `parameters={...}`. Values are merged **shallowly**; for
+example, `default_widths` replaces the full road-width table. Distances are
+projected metres. Unknown or unsupported keys raise `ValueError`.
+With `ignore_existing=False`, blocks whose mapped sidewalk length/perimeter
+exceeds `cutoff_percent_protoblock` are excluded from new sidewalks and crossing
+centres. `ignore_existing=True` bypasses this filter; separate road-tag
+exclusions still apply. Widths and tags survive street topology processing.
+
+These parameter fixes describe the development branch and require installing
+the checkout (`python -m pip install .`) until the next PyPI release.
 
 Generated geometry is a mapping starting point requiring review, not a verified
 production pedestrian network. Full same-input QGIS GUI geometry parity remains
@@ -67,8 +86,7 @@ result = sidewalkreator(bbox=(-72.53, 42.37, -72.52, 42.38))
 # All options support additional parameters
 result = sidewalkreator(
     bbox=(-72.53, 42.37, -72.52, 42.38),
-    parameters={"buffer_dist": 2.0},  # Optional custom parameters
-    ignore_existing=False
+    parameters={"buffer_dist": 2.0},  # Total extra width; 1 m nominal offset per side
 )
 
 # Extract results - all are GeoDataFrames
@@ -117,8 +135,8 @@ sidewalkreator --place-name "Amherst, MA" --output-dir ./output
 # Option 3: Use a bounding box (minx miny maxx maxy)
 sidewalkreator --bbox -72.53 42.37 -72.52 42.38 --output-dir ./output
 
-# All options support additional parameters
-sidewalkreator --bbox -72.53 42.37 -72.52 42.38 --output-dir ./output --ignore-existing
+# Runtime overrides are read from a JSON object
+sidewalkreator --bbox -72.53 42.37 -72.52 42.38 --output-dir ./output --parameters parameters.json
 ```
 
 **Alternative**: The tool can also be invoked using `python -m headless_sidewalkreator` with the same arguments.
@@ -229,9 +247,6 @@ python -c "from headless_sidewalkreator import sidewalkreator; print(sidewalkrea
 	older `geometries_` names if necessary.
 - CI workflow is provided in `.github/workflows/ci.yml` which installs
 	dependencies and runs the test suite on GitHub Actions.
-
-If you'd like, I can add a Makefile or small helper scripts to automate
-these steps.
 
 This is the headless version of a QGIS Plugin called OSM Sidewalkreator, available at:
 

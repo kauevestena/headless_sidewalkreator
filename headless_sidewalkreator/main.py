@@ -124,7 +124,7 @@ def main():
     parser.add_argument(
         "--ignore-existing",
         action="store_true",
-        help="If set, ignores existing sidewalks and generates all possible sidewalks.",
+        help="Bypass mapped footway=sidewalk block coverage filtering. Road sidewalk-tag exclusions still apply.",
     )
 
     args = parser.parse_args()
@@ -134,9 +134,14 @@ def main():
 
     # Load parameters from file if provided
     parameters = {}
-    if args.parameters_path and os.path.exists(args.parameters_path):
-        with open(args.parameters_path, "r") as f:
-            parameters = json.load(f)
+    if args.parameters_path:
+        try:
+            with open(args.parameters_path, "r") as f:
+                parameters = json.load(f)
+        except (OSError, ValueError) as exc:
+            parser.error(f"Cannot load --parameters file: {exc}")
+        if not isinstance(parameters, dict):
+            parser.error("--parameters must contain a JSON object")
 
     # Load input polygon if path is provided
     input_polygon_gdf = None
@@ -145,11 +150,14 @@ def main():
 
     # Handle planet download provider and kwargs
     if args.planet_download or args.provider:
-        parameters["provider"] = args.provider or "overture"
-        provider_kwargs = {}
-        if args.release:
-            provider_kwargs["release"] = args.release
-        parameters["provider_kwargs"] = provider_kwargs
+        parameters["provider"] = args.provider or parameters.get("provider") or "overture"
+    if args.release:
+        if parameters.get("provider") != "overture":
+            parser.error("--release requires the overture provider")
+        provider_kwargs = parameters.get("provider_kwargs", {})
+        if not isinstance(provider_kwargs, dict):
+            parser.error("provider_kwargs must be a JSON object")
+        parameters["provider_kwargs"] = {**provider_kwargs, "release": args.release}
 
     # Call the new GeoDataFrame-based API
     result = sidewalkreator(

@@ -26,10 +26,12 @@ from .generic_functions import (
     draw_crossings_gdf,
     split_sidewalks_gdf,
     generate_kerbs_gdf,
+    filter_protoblocks_by_sidewalks,
     save_debug_layer,
 )
 from . import parameters as params
 from .logging_config import get_logger
+from .runtime_parameters import merge_parameters
 
 
 logger = get_logger(__name__)
@@ -337,25 +339,49 @@ def _apply_dead_end_removal(
     return pruned_gdf
 
 
+def _apply_existing_sidewalk_policy(
+    sidewalks_gdf: gpd.GeoDataFrame,
+    protoblocks_gdf: gpd.GeoDataFrame,
+    osm_gdf: gpd.GeoDataFrame,
+    run_params: dict,
+    ignore_existing: bool,
+) -> tuple:
+    """Exclude covered blocks from candidate sidewalks and crossing centres."""
+    if ignore_existing or ("footway" not in osm_gdf and "other_tags" not in osm_gdf):
+        existing = osm_gdf.iloc[0:0]
+    else:
+        _, existing, _ = data_clean_gdf(
+            osm_gdf, run_params["default_widths"], run_params["fallback_default_width"]
+        )
+    active_blocks = filter_protoblocks_by_sidewalks(
+        protoblocks_gdf,
+        existing,
+        run_params["cutoff_percent_protoblock"],
+        ignore_existing=ignore_existing,
+        show_progress=run_params["show_progress"],
+    )
+    if len(active_blocks) != len(protoblocks_gdf):
+        sidewalks_gdf = clip_gdf(sidewalks_gdf, active_blocks)
+        sidewalks_gdf = sidewalks_gdf.explode(index_parts=False, ignore_index=True)
+        sidewalks_gdf = sidewalks_gdf[
+            sidewalks_gdf.geometry.geom_type == "LineString"
+        ].copy()
+    return sidewalks_gdf, active_blocks
+
+
 def _generate_crossings(
     splitted_gdf: gpd.GeoDataFrame,
     sidewalks_gdf: gpd.GeoDataFrame,
     protoblocks_gdf: gpd.GeoDataFrame,
     run_params: dict,
-    ignore_existing: bool,
 ) -> gpd.GeoDataFrame:
-    """Filter protoblocks and generate crossings."""
-    # draw_crossings_gdf currently keeps this argument for API compatibility but
-    # does not consume it. Avoid an expensive spatial join and dissolve whose
-    # result cannot affect the generated crossings.
-    filtered_protoblocks_gdf = protoblocks_gdf
-    logger.info("Step 12 complete")
+    """Generate crossings using the retained protoblocks and sidewalks."""
 
     # 13. Draw crossings using ABCDE algorithm
     crossings_gdf = draw_crossings_gdf(
         splitted_gdf,
         sidewalks_gdf,
-        filtered_protoblocks_gdf,
+        protoblocks_gdf,
         curve_radius=run_params["default_curve_radius"],
         inward_offset=run_params["crossing_inward_offset"],
         extra_length=run_params["crossing_extra_length"],
@@ -432,7 +458,11 @@ def generate_protoblocks(
               Use this OR input_polygon_gdf OR place_name, not multiple.
         osm_gdf: Optional GeoDataFrame with OSM data to be used instead of fetching.
                 If None, OSM data will be fetched automatically for the input polygon's bbox.
-        parameters: Optional dictionary with runtime parameters to override defaults.
+        parameters: Optional dictionary of runtime overrides, merged shallowly.
+            Acquisition, widths, progress and topology controls are used here;
+            see docs/parameters.rst for per-API applicability. Unknown keys raise
+            ValueError before processing. Crossing/segmentation-only options
+            are not accepted by this standalone API.
 
     Returns:
         GeoDataFrame containing the protoblocks (polygon geometries).
@@ -442,13 +472,10 @@ def generate_protoblocks(
     # Consolidate parameters
     run_params = {
         "timeout": 60,
+        "provider": None,
+        "provider_kwargs": {},
         "default_widths": params.default_widths,
         "fallback_default_width": params.fallback_default_width,
-        "crossing_inward_offset": params.crossing_inward_offset,
-        "crossing_extra_length": params.crossing_extra_length,
-        "crossing_ray_growth_factor": params.crossing_ray_growth_factor,
-        "crossing_max_ray_iterations": params.crossing_max_ray_iterations,
-        "crossing_node_precision": params.crossing_node_precision,
         "renode_before_polygonize": False,
         "repair_protomaps_topology": params.repair_protomaps_topology,
         "protomaps_endpoint_snap_tolerance": params.protomaps_endpoint_snap_tolerance,
@@ -457,8 +484,7 @@ def generate_protoblocks(
         "save_debug_layers": False,
     }
 
-    if parameters:
-        run_params.update(parameters)
+    run_params = merge_parameters(run_params, parameters)
 
     input_gdf = _resolve_input_area(place_name, input_polygon_gdf, bbox)
     provider_kwargs = dict(run_params.get("provider_kwargs", {}))
@@ -494,6 +520,9 @@ def generate_protoblocks(
     )
 
     logger.info("Step 8 complete")
+    _save_debug_layer_if_enabled(
+        run_params["save_debug_layers"], splitted_gdf, "sidewalkreator_splitted_lines"
+    )
     logger.info("Protoblocks generation complete")
     return protoblocks_gdf
 
@@ -519,9 +548,22 @@ def sidewalkreator(
               Use this OR input_polygon_gdf OR place_name, not multiple.
         osm_gdf: Optional GeoDataFrame with OSM data to be used instead of fetching.
                 If None, OSM data will be fetched automatically for the input polygon's bbox.
-        parameters: Optional dictionary with runtime parameters to override defaults.
-        ignore_existing: If True, ignores existing sidewalks and generates all
-            possible sidewalks without filtering based on pre-existing coverage.
+        parameters: Optional dictionary of runtime overrides, merged shallowly
+            with the defaults below. Geometry distances use the estimated local
+            UTM CRS in metres; percentages use 25 for 25%. Nested dictionaries
+            replace their defaults rather than merging recursively. Unknown
+            keys raise ValueError before processing. See
+            docs/parameters.rst for defaults, validation and interactions.
+        ignore_existing: If True, bypass the existing footway=sidewalk coverage
+            filter. Otherwise, blocks whose mapped sidewalk length/perimeter
+            exceeds cutoff_percent_protoblock are excluded from new sidewalks
+            and crossing centres. Separate sidewalk=no/left/right road-tag
+            exclusions still apply. This is a function argument, not a parameters key.
+
+    Notes:
+        ``result['parameters']`` records merged values, not necessarily local
+        helper clamps or proof that a supplied key affected geometry. Module
+        constants in parameters.py are not all exposed as runtime controls.
 
     Returns:
         Dictionary containing output GeoDataFrames with keys:
@@ -539,6 +581,8 @@ def sidewalkreator(
     # Consolidate parameters
     run_params = {
         "timeout": 60,
+        "provider": None,
+        "provider_kwargs": {},
         "default_widths": params.default_widths,
         "fallback_default_width": params.fallback_default_width,
         "default_curve_radius": params.default_curve_radius,
@@ -570,13 +614,12 @@ def sidewalkreator(
         "save_debug_layers": False,
     }
 
-    if parameters:
-        run_params.update(parameters)
+    run_params = merge_parameters(run_params, parameters)
 
     # 1-7. Core preprocessing
     show_progress = run_params.get("show_progress", False)
     overall_progress = tqdm(
-        total=10,
+        total=11,
         desc="Sidewalkreator pipeline",
         unit="stage",
         disable=not show_progress,
@@ -689,16 +732,28 @@ def sidewalkreator(
         _overall_progress=overall_progress,
     )
 
-    # 12-13. Generate crossings
+    # 11-12. Apply mapped-sidewalk coverage before generating crossings.
+    sidewalks_gdf, active_protoblocks_gdf = _run_timed_stage(
+        "Steps 11-12: filter existing sidewalk coverage",
+        show_progress,
+        _apply_existing_sidewalk_policy,
+        sidewalks_gdf,
+        protoblocks_gdf,
+        clipped_reproj_gdf,
+        run_params,
+        ignore_existing,
+        _overall_progress=overall_progress,
+    )
+
+    # 13. Generate crossings
     crossings_gdf = _run_timed_stage(
-        "Steps 12-13: filter protoblocks and generate crossings",
+        "Step 13: generate crossings",
         show_progress,
         _generate_crossings,
         splitted_gdf,
         sidewalks_gdf,
-        protoblocks_gdf,
+        active_protoblocks_gdf,
         run_params,
-        ignore_existing,
         _overall_progress=overall_progress,
     )
 

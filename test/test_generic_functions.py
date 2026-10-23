@@ -42,16 +42,13 @@ from headless_sidewalkreator.generic_functions import (
 from headless_sidewalkreator.parameters import default_widths, fallback_default_width
 
 @patch('headless_sidewalkreator.generic_functions.get_osm_data')
-def test_fetch_street_network_for_bbox_fallback(mock_get_osm_data):
-    """Test the fallback mechanism in fetch_street_network_for_bbox."""
+def test_fetch_street_network_for_bbox_propagates_failure(mock_get_osm_data):
+    """A failed provider must never produce invented streets."""
     mock_get_osm_data.side_effect = Exception("OSM fetch failed")
 
     bbox = (10, 20, 30, 40)
-    gdf = fetch_street_network_for_bbox(bbox)
-
-    assert not gdf.empty
-    assert len(gdf) == 3
-    assert gdf.crs.to_string() == "EPSG:4326"
+    with pytest.raises(Exception, match="OSM fetch failed"):
+        fetch_street_network_for_bbox(bbox)
 
 def test_polygonize_lines_gdf():
     """Test polygonize_lines_gdf."""
@@ -354,8 +351,10 @@ def test_data_clean_gdf_with_footway():
 
 @patch('headless_sidewalkreator.generic_functions.get_osm_data')
 def test_fetch_street_network_for_bbox_normalize_bbox(mock_get_osm_data):
-    """Test the fallback mechanism with a GeoDataFrame as bbox."""
-    mock_get_osm_data.side_effect = Exception("OSM fetch failed")
+    """Resolve a GeoDataFrame area before calling the provider."""
+    mock_get_osm_data.return_value = gpd.GeoDataFrame(
+        geometry=[LineString([(0, 0), (1, 1)])], crs="EPSG:4326"
+    )
 
     # Create a GeoDataFrame to use as the bbox
     p1 = Polygon([(0,0), (1,0), (1,1), (0,1)])
@@ -364,8 +363,9 @@ def test_fetch_street_network_for_bbox_normalize_bbox(mock_get_osm_data):
     gdf = fetch_street_network_for_bbox(bbox_gdf)
 
     assert not gdf.empty
-    assert len(gdf) == 3
+    assert len(gdf) == 1
     assert gdf.crs.to_string() == "EPSG:4326"
+    assert list(mock_get_osm_data.call_args.args[0]) == [0, 0, 1, 1]
 
 @pytest.mark.xfail(reason="Voronoi splitting is sensitive to floating point precision")
 def test_split_sidewalks_by_voronoi():

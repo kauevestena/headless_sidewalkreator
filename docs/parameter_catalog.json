@@ -1,0 +1,343 @@
+{
+  "groups": [
+    "Data acquisition and progress",
+    "Road widths and sidewalk geometry",
+    "Street topology",
+    "Crossing placement and acceptance",
+    "Sidewalk segmentation",
+    "Existing sidewalk coverage"
+  ],
+  "parameters": {
+    "timeout": {
+      "group": "Data acquisition and progress",
+      "type": "number",
+      "units": "seconds",
+      "values": "Use a positive finite number. OSMnx clamps the request timeout to at least 60 s. Protomaps uses the supplied request timeout. This is not a total pipeline time limit.",
+      "description": "Controls acquisition when data is downloaded. With an injected osm_gdf, the download is skipped and this setting has no acquisition effect. It is not applied to Overture's DuckDB queries or place-name geocoding.",
+      "used_by": [
+        "sidewalkreator",
+        "generate_protoblocks"
+      ]
+    },
+    "provider": {
+      "group": "Data acquisition and progress",
+      "type": "str or None",
+      "units": "none",
+      "values": "None selects OSMnx/Overpass; 'protomaps' selects PMTiles; 'overture' selects GeoParquet. Other names raise ValueError.",
+      "description": "Selects acquisition when osm_gdf is omitted. With supplied data it can still identify the Protomaps preprocessing path. See the provider section for nested options.",
+      "used_by": [
+        "sidewalkreator",
+        "generate_protoblocks"
+      ]
+    },
+    "provider_kwargs": {
+      "group": "Data acquisition and progress",
+      "type": "dict",
+      "units": "option-dependent",
+      "values": "A dictionary containing only the nested options supported by the selected provider. Unknown names raise ValueError; timeout and provider belong at the top level.",
+      "description": "Passed through the acquisition wrappers. show_progress is inserted automatically unless supplied in this dictionary, and routed separately from provider constructor options. Nested dictionaries replace defaults; they are not recursively merged. No download occurs with a supplied osm_gdf.",
+      "used_by": [
+        "sidewalkreator",
+        "generate_protoblocks"
+      ]
+    },
+    "show_progress": {
+      "group": "Data acquisition and progress",
+      "type": "bool",
+      "units": "none",
+      "values": "True or False.",
+      "description": "Enables pipeline progress bars and stage timings. This changes console/notebook output, not generation rules. Also forwarded to acquisition where supported unless provider_kwargs supplies its own value.",
+      "used_by": [
+        "sidewalkreator",
+        "generate_protoblocks"
+      ]
+    },
+    "save_debug_layers": {
+      "group": "Data acquisition and progress",
+      "type": "bool",
+      "units": "none",
+      "values": "True or False.",
+      "description": "Both APIs write the prepared street layer to debug_layers/sidewalkreator_splitted_lines.geojson relative to the working directory. The full pipeline saves after dead-end pruning; the standalone API does not prune. This does not export the final layers.",
+      "used_by": [
+        "sidewalkreator",
+        "generate_protoblocks"
+      ]
+    },
+    "default_widths": {
+      "group": "Road widths and sidewalk geometry",
+      "type": "dict[str, number]",
+      "units": "metres, total road width",
+      "values": "Non-negative widths by highway class. Values below 0.5 exclude that class. The supplied dictionary replaces the complete default table; it is not merged into it.",
+      "description": "Assigns total road widths during cleaning; existing OSM width tags are replaced. For a partial edit, copy the default table first. Unknown classes use fallback_default_width. Widths and source road tags are retained through native intersection splitting and Protomaps normalization. These values are road widths, not a requested sidewalk width.",
+      "used_by": [
+        "sidewalkreator",
+        "generate_protoblocks"
+      ]
+    },
+    "fallback_default_width": {
+      "group": "Road widths and sidewalk geometry",
+      "type": "number",
+      "units": "metres",
+      "values": "Use a finite positive width, at least 0.5 to retain unknown highway classes.",
+      "description": "Width assigned during cleaning when a highway class is absent from default_widths. The assigned width is retained through topology processing and used by sidewalk and crossing generation.",
+      "used_by": [
+        "sidewalkreator",
+        "generate_protoblocks"
+      ]
+    },
+    "buffer_dist": {
+      "group": "Road widths and sidewalk geometry",
+      "type": "number",
+      "units": "metres, total extra width",
+      "values": "Use a finite non-negative number; there is no general range validator.",
+      "description": "The nominal sidewalk-axis offset from the street centreline is road_width / 2 + buffer_dist / 2. Increasing this value by 2 m moves each side nominally 1 m farther out; it does not define a sidewalk polygon's physical width. Building adjustments can alter the per-segment buffer. Also passed to side-specific OSM tag exclusion geometry.",
+      "used_by": [
+        "sidewalkreator"
+      ]
+    },
+    "default_curve_radius": {
+      "group": "Road widths and sidewalk geometry",
+      "type": "number",
+      "units": "metres",
+      "values": "Use a finite non-negative radius. Zero disables corner rounding on the bounded-block path.",
+      "description": "Radius used to round buffered block corners. Larger radii round corners more strongly and can remove small enclosed shapes. Also contributes to the crossing centre's initial inward distance: half the selected transversal street width + this radius + crossing_inward_offset.",
+      "used_by": [
+        "sidewalkreator"
+      ]
+    },
+    "min_d_to_building": {
+      "group": "Road widths and sidewalk geometry",
+      "type": "number",
+      "units": "metres",
+      "values": "Use a finite non-negative target clearance.",
+      "description": "Used in nearby-building buffer adjustment. It is a heuristic, not a guaranteed output clearance: the module's minimal_buffer floor (3 m) and subsequent geometry operations can prevent that clearance. If there are no building polygons, this step leaves the default buffer in use.",
+      "used_by": [
+        "sidewalkreator"
+      ]
+    },
+    "dead_end_removal_iterations": {
+      "group": "Street topology",
+      "type": "int",
+      "units": "iterations",
+      "values": "Use a non-negative integer. Zero disables pruning; values <= 0 currently bypass pruning without an error.",
+      "description": "Prunes leaf-touching street segments before polygonization and sidewalk buffering. Each iteration may expose new leaves, so larger values can remove more branches and alter completeness near the AOI edge. It is independent of the ignore_existing coverage policy. The standalone protoblock API does not apply this pruning stage.",
+      "used_by": [
+        "sidewalkreator"
+      ]
+    },
+    "renode_before_polygonize": {
+      "group": "Street topology",
+      "type": "bool",
+      "units": "none",
+      "values": "True or False.",
+      "description": "Nodes the prepared linework again before polygonizing protoblocks. It can repair missed intersections but costs extra geometry processing. False retains the existing prepared topology. This is distinct from Protomaps endpoint gap repair.",
+      "used_by": [
+        "sidewalkreator",
+        "generate_protoblocks"
+      ]
+    },
+    "repair_protomaps_topology": {
+      "group": "Street topology",
+      "type": "bool",
+      "units": "none",
+      "values": "True or False. Applies when provider='protomaps', GeoDataFrame attrs identify that provider, or populated pmap: columns identify the source.",
+      "description": "Enables deduplication/noding and forward-facing endpoint gap repair for Protomaps lines. Disable to use the native intersection splitter. Non-Protomaps sources do not enter this repair path.",
+      "used_by": [
+        "sidewalkreator",
+        "generate_protoblocks"
+      ]
+    },
+    "protomaps_endpoint_snap_tolerance": {
+      "group": "Street topology",
+      "type": "number",
+      "units": "metres",
+      "values": "Converted to float; must be finite and >= 0. Invalid values raise ValueError, even when Protomaps repair is inactive. Zero disables endpoint-gap connection.",
+      "description": "Maximum distance for a disconnected Protomaps endpoint to connect forward to another line. A larger tolerance can close more gaps but can also connect distinct nearby roads. Noding/deduplication still runs when the tolerance is zero.",
+      "used_by": [
+        "sidewalkreator",
+        "generate_protoblocks"
+      ]
+    },
+    "protomaps_endpoint_snap_max_angle": {
+      "group": "Street topology",
+      "type": "number",
+      "units": "degrees",
+      "values": "Converted to float; must be finite and between 0 and 180 inclusive. Invalid values raise ValueError even when repair is inactive.",
+      "description": "Maximum angle between a disconnected endpoint's forward direction and a proposed connector. Smaller values require closer directional alignment; larger values admit more oblique connections. Used only for Protomaps repair.",
+      "used_by": [
+        "sidewalkreator",
+        "generate_protoblocks"
+      ]
+    },
+    "min_crossing_segment_length": {
+      "group": "Crossing placement and acceptance",
+      "type": "number",
+      "units": "metres",
+      "values": "Use a finite non-negative number; negative values are clamped to zero by the crossing generator.",
+      "description": "Minimum length of the source street segment eligible to seed a crossing. It is not a minimum crossing length. Raising it skips more short approach segments; lowering it permits candidates on shorter approaches.",
+      "used_by": [
+        "sidewalkreator"
+      ]
+    },
+    "crossing_center_buffer_distance": {
+      "group": "Crossing placement and acceptance",
+      "type": "number",
+      "units": "metres, radius",
+      "values": "Use a finite non-negative number; negative values are clamped to zero.",
+      "description": "The initial crossing centre is buffered by this radius and must be within the protoblock union. A larger radius is more restrictive. At zero, the centre point itself is tested. This affects eligibility, not the width of a generated crossing.",
+      "used_by": [
+        "sidewalkreator"
+      ]
+    },
+    "crossing_direction_mode": {
+      "group": "Crossing placement and acceptance",
+      "type": "str",
+      "units": "none",
+      "values": "'parallel' or 'perpendicular', case-insensitive. Other strings raise ValueError.",
+      "description": "Parallel aligns the crossing ray to the selected transversal street at the intersection; perpendicular uses the normal to the current approach segment. Parallel does not mean along the road being crossed. The same mode is applied at both endpoint orientations.",
+      "used_by": [
+        "sidewalkreator"
+      ]
+    },
+    "crossing_inward_offset": {
+      "group": "Crossing placement and acceptance",
+      "type": "number",
+      "units": "metres",
+      "values": "Use a finite non-negative number.",
+      "description": "Extra distance along the approach segment away from the intersection, added after half the transversal street width and default_curve_radius. Clamped by the available approach length.",
+      "used_by": [
+        "sidewalkreator"
+      ]
+    },
+    "crossing_extra_length": {
+      "group": "Crossing placement and acceptance",
+      "type": "number",
+      "units": "metres",
+      "values": "Use a finite non-negative number; a road_width + extra_length <= 0 candidate is discarded.",
+      "description": "Added to the source road width to form the crossing search's base length. This base also sets the tolerance threshold together with perc_tol_crossings. It does not add a fixed amount to the final crossing geometry.",
+      "used_by": [
+        "sidewalkreator"
+      ]
+    },
+    "perc_tol_crossings": {
+      "group": "Crossing placement and acceptance",
+      "type": "number",
+      "units": "percent (25 means 25%)",
+      "values": "Use a finite non-negative percentage; no upper-bound validation is applied.",
+      "description": "Candidate length must be <= (source road width + crossing_extra_length) * (1 + perc_tol_crossings / 100), as well as <= abs_max_crossing_len. Exceeding the threshold triggers inward retries and eventual rejection, not acceptance of an overlength crossing.",
+      "used_by": [
+        "sidewalkreator"
+      ]
+    },
+    "increment_inward": {
+      "group": "Crossing placement and acceptance",
+      "type": "number",
+      "units": "metres per retry",
+      "values": "Use a finite positive increment.",
+      "description": "Moves the crossing centre farther inward after an unsuccessful or overlong candidate, up to the approach's available inward limit. Increasing it searches fewer intermediate positions; decreasing it may need more retries.",
+      "used_by": [
+        "sidewalkreator"
+      ]
+    },
+    "max_crossings_iterations": {
+      "group": "Crossing placement and acceptance",
+      "type": "int",
+      "units": "attempts",
+      "values": "Use a positive integer. The public pipeline's noded crossing path coerces to int and uses at least one attempt.",
+      "description": "Limit on candidate-centre attempts. This is separate from ray-growth attempts on each side. A larger value allows more inward positions to be searched. It does not guarantee that a crossing is found.",
+      "used_by": [
+        "sidewalkreator"
+      ]
+    },
+    "abs_max_crossing_len": {
+      "group": "Crossing placement and acceptance",
+      "type": "number",
+      "units": "metres",
+      "values": "Use a finite positive length.",
+      "description": "Hard upper bound on an accepted crossing, in addition to the relative percentage threshold. Raising it only matters if the relative threshold also permits the candidate.",
+      "used_by": [
+        "sidewalkreator"
+      ]
+    },
+    "crossing_ray_growth_factor": {
+      "group": "Crossing placement and acceptance",
+      "type": "number",
+      "units": "dimensionless multiplier",
+      "values": "Coerced to a minimum of 1.1 by the crossing generator; use a finite value > 1.",
+      "description": "Multiplier used to extend each ray while searching for a real sidewalk intersection. Larger values extend farther per attempt. Both intersections must be found; this option does not authorize fabricated endpoints.",
+      "used_by": [
+        "sidewalkreator"
+      ]
+    },
+    "crossing_max_ray_iterations": {
+      "group": "Crossing placement and acceptance",
+      "type": "int",
+      "units": "attempts per side",
+      "values": "Converted to int and clamped to at least 1.",
+      "description": "Bounds ray-growth attempts per side at each candidate centre. Distinct from max_crossings_iterations, which controls centre retries. Increasing both can increase processing cost.",
+      "used_by": [
+        "sidewalkreator"
+      ]
+    },
+    "crossing_node_precision": {
+      "group": "Crossing placement and acceptance",
+      "type": "int",
+      "units": "decimal places in projected coordinates",
+      "values": "Converted to int and clamped to a minimum of 3.",
+      "description": "Rounding precision for grouping street endpoints into crossing nodes. The coordinates are in the estimated metric UTM CRS, not longitude/latitude degrees. More decimals mean finer grouping, not a larger search tolerance.",
+      "used_by": [
+        "sidewalkreator"
+      ]
+    },
+    "perc_draw_kerbs": {
+      "group": "Crossing placement and acceptance",
+      "type": "number",
+      "units": "percent (30 means 30%)",
+      "values": "Converted to a fraction and clamped to [0, 0.49], equivalent to 0–49%.",
+      "description": "Places intermediate kerb points B and D by interpolation from the sidewalk hits A and E toward centre C. At 30%, B lies 30% of A-to-C and D 30% of E-to-C. It does not control how many crossings receive kerbs.",
+      "used_by": [
+        "sidewalkreator"
+      ]
+    },
+    "split_max_len": {
+      "group": "Sidewalk segmentation",
+      "type": "number or None",
+      "units": "metres",
+      "values": "None (or zero) skips this split rule; otherwise use a finite positive length.",
+      "description": "Attempts length-based splitting after block-corner and POI/Voronoi splitting. Then split_num_segments, crossing splitting and short-segment merging run. The final lengths are not guaranteed to remain below this value: merging can lengthen them and splitting failures or requests for >1000 splits retain the original line.",
+      "used_by": [
+        "sidewalkreator"
+      ]
+    },
+    "split_num_segments": {
+      "group": "Sidewalk segmentation",
+      "type": "int or None",
+      "units": "segments per input line at this stage",
+      "values": "None (or zero) skips the rule; otherwise use a positive integer.",
+      "description": "Splits each line into this many equal-length parts after split_max_len. It is not a final feature count: later crossing splits and short-segment merging can change the count.",
+      "used_by": [
+        "sidewalkreator"
+      ]
+    },
+    "min_stretch_size": {
+      "group": "Sidewalk segmentation",
+      "type": "number or None",
+      "units": "metres",
+      "values": "None or <= 0 disables short-segment merging; otherwise use a finite positive length.",
+      "description": "Attempts to merge short final pieces with connected neighbours, including runs without crossing points. This is a merge target, not a guaranteed minimum: isolated pieces can remain shorter.",
+      "used_by": [
+        "sidewalkreator"
+      ]
+    },
+    "cutoff_percent_protoblock": {
+      "group": "Existing sidewalk coverage",
+      "type": "number",
+      "units": "percent (40 means 40%)",
+      "values": "A finite number from 0 to 100 inclusive; invalid values raise ValueError.",
+      "description": "When ignore_existing=False, blocks with existing footway=sidewalk length / block perimeter * 100 above this cutoff are excluded from candidate sidewalks and crossing centres. Length is clipped to each block and deduplicated; coverage is capped at 100%. A cutoff of 100 keeps all blocks. ignore_existing=True bypasses this filter. All protoblocks remain in the diagnostic result.",
+      "used_by": [
+        "sidewalkreator"
+      ]
+    }
+  }
+}

@@ -2,8 +2,16 @@
 
 """Configurable parameters for the sidewalk generation process.
 
-This file contains constants and "hyperparameters" that control the behavior
-of the sidewalk generation algorithm. All distance values are in meters.
+This file contains defaults and internal constants. Not every name is a public
+runtime override. Pass documented keys through ``sidewalkreator(parameters=...)``;
+do not edit module globals to configure a run. Distances are in projected metres,
+except explicitly named angular/percentage quantities. ``default_widths`` maps
+highway classes to total road widths, not sidewalk widths.
+
+See ``docs/parameters.rst`` (the Sphinx parameter reference) for the complete
+runtime key inventory, defaults, units, validation and current no-effect options.
+The documentation builder reads defaults here and in the public API dictionaries
+without importing the GIS stack.
 """
 
 
@@ -41,7 +49,7 @@ roads_layername = "osm_road_data"
 big_buffer_d = 10000
 
 # min buffer size for the worst case (building intersecting road)
-minimal_buffer = 3  # 2m
+minimal_buffer = 3  # Internal 3 m floor; not a runtime override.
 
 # distance to add to distance to interpolate inner_points, should be a small distance, 0.5 or 1 m, generally
 d_to_add_interp_d = 2
@@ -174,7 +182,8 @@ max_crossings_iterations = 20
 # max distance for distance search in knn
 knn_max_dist = 50
 
-# cutoff percent to say that a protoblock contains an already drawn sidewalk:
+# Exclude blocks when mapped sidewalk length / block perimeter * 100 exceeds
+# this threshold. The ignore_existing function argument bypasses this filter.
 cutoff_percent_protoblock = 40
 
 # for duplicate points (m):

@@ -2,8 +2,8 @@
 
 Initial version: **0.1.0**. Distribution: `sidewalkreator`; import:
 `headless_sidewalkreator`; command: `sidewalkreator`.
-The PyPI JSON API returned 404 for this name on 2026-09-21. This does not reserve
-the name or guarantee PyPI will permit registration.
+Version 0.1.0 was published to PyPI on 2026-10-20. The setup and validation
+sequence below also applies to later releases, using a new version number.
 
 ## One-time owner setup
 
@@ -67,9 +67,10 @@ imports, generates an offline synthetic street grid, and runs the full suite
 with no source package present. Editable installs alone cannot validate release
 packaging.
 
-Packaging readiness does not certify Từ Liêm production acceptance: GUI geometry
-comparison and manual network QA remain necessary. Road attributes lost during
-line splitting are a separate known algorithmic limitation.
+Packaging readiness does not certify production acceptance: GUI geometry
+comparison and manual network QA remain necessary. Before the next release,
+include the parameter fixes and Sphinx reference from the development branch;
+the published 0.1.0 wheel predates them.
 
 TODO: Restore Python 3.15 verification in both the source-test and installed-wheel
 CI matrices once the native dependency ecosystem is ready. Verification is
@@ -81,9 +82,10 @@ the code uses GeoPandas I/O, not Fiona-specific APIs. Installed-wheel smoke
 tests exercise real GeoJSON and GeoPackage round trips with the default engine.
 This removes the Fiona/GDAL source-build blocker on Python 3.14.
 
-The current Python 3.15 blocker is a Shapely 2.1.2 source-build failure on
-3.15rc2: `numpy/ndarraytypes.h` is missing
+At the September 22 deferral, validation encountered a Shapely 2.1.2
+source-build failure on 3.15rc2: `numpy/ndarraytypes.h` was missing
 ([failed installed-wheel job](https://github.com/kauevestena/headless_sidewalkreator/actions/runs/35633260112/job/106444462872)).
+This is historical failure evidence, not a current ecosystem assessment.
 Before restoring 3.15, confirm compatible dependency wheels or successful native
 builds, then require both source tests and clean installed-wheel tests to pass,
 including CLI imports, offline generation, GeoJSON/GeoPackage round trips, and
